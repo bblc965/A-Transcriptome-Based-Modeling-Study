@@ -1,0 +1,832 @@
+library(tidyverse)
+library(glmnet)
+library(pROC)
+data<- read.csv("gse65682logistic.csv", row.names=1, check.names = FALSE)
+data <- as.data.frame(data)
+names(data) <- gsub("-", "_", names(data))
+geneName <- c( "MMP8","DDX24","EMB","RNASE2")
+x.train <- data[, geneName] %>% as.matrix()
+y.train <- data[, "disease.status"]  
+set.seed(1000)
+# Cross-validation, fitting the model
+cvfit <- cv.glmnet(
+  x = x.train,
+  y = y.train,
+  family = "binomial",
+  type.measure = "deviance",
+  alpha = 1,
+  nfolds = 5,
+  maxit = 100000)
+# Directly extract the coefficients (no need for re-fitting)
+coef_min<- coef(cvfit, s = "lambda.min")
+coef_1se <- coef(cvfit, s = "lambda.1se")
+# Draw the regression path diagram (coefficients vary with lambda)
+# xvar is optional and can be either "lambda" or "norm" (L1 norm), and "lambda" is usually used.
+plot(cvfit$glmnet.fit, xvar = "lambda", label = TRUE, 
+     xlab = expression(log(lambda)), ylab = "Coefficients")
+# Plot the cross-validation curve (deviation varies with lambda)
+plot(cvfit, sign.lambda = 1)  # "sign.lambda = 1" indicates that the x-axis represents log(lambda)
+# Extract the final model coefficients
+fit <-glmnet(
+  x = x.train,
+  y = y.train,
+  family = "binomial",
+  alpha = 1,
+  lambda = cvfit$lambda.min  
+)
+#Draw a nomogram diagram
+library(rms)
+# Extract LASSO coefficients
+coefs <- as.matrix(coef(fit)) 
+intercept <- coefs[1,1]
+c_MMP8   <- coefs["MMP8",1]
+c_DDX24 <- coefs["DDX24",1]
+c_EMB  <- coefs["EMB",1]
+c_RNASE2    <- coefs["RNASE2",1]
+
+# Build the model using lrm, and the nomogram chart only recognizes logistic regression.
+data_nomo <- data[, c("disease.status", geneName)]
+dd <- datadist(data_nomo)
+options(datadist = "dd")
+# Build an empty model and directly assign values to the LASSO coefficients
+model_nomo <- lrm(disease.status ~ MMP8 + DDX24 + EMB + RNASE2, data = data_nomo)
+model_nomo$coefficients <- c(intercept, c_MMP8, c_RNASE2, c_DDX24, c_EMB)
+# Draw
+nomogram <- nomogram(
+  model_nomo,
+  fun = function(x) plogis(x),
+  funlabel = "Predicted Probability",
+  fun.at = c(0.01, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 0.95, 0.99)
+)
+plot(nomogram)
+# Save as PDF
+pdf("nomagram.pdf", width=30, height=15)
+plot(nomogram)
+dev.off()
+
+#Build a function to output parameters of the model such as specificity and sensitivity, etc.
+library(pROC)
+# Confidence interval calculation tool function
+binomial_ci <- function(x, n, conf.level = 0.95) {
+  # Binomial distribution 95% confidence interval (Wilson method, more robust)
+  if (n == 0) return(c(lower = NA, upper = NA))
+  
+  res <- binom.test(x, n, conf.level = conf.level)
+  ci <- res$conf.int
+  return(c(lower = ci[1], upper = ci[2]))
+}
+auc_ci <- function(roc_obj, conf.level = 0.95) {
+  # The 95% confidence interval of AUC (obtained using the bootstrap method)
+  ci_auc <- ci.auc(roc_obj, method = "bootstrap", boot.n = 2000, conf.level = conf.level)
+  return(c(lower = ci_auc[1], upper = ci_auc[3]))
+}
+
+# Core indicator calculation function
+calculate_metrics <- function(actual, predicted_prob, threshold = 0.5) {
+  predicted_class <- ifelse(predicted_prob >= threshold, 1, 0)
+  confusion <- table(Actual = actual, Predicted = predicted_class)
+  
+  TP <- ifelse("1" %in% rownames(confusion) & "1" %in% colnames(confusion), confusion["1", "1"], 0)
+  TN <- ifelse("0" %in% rownames(confusion) & "0" %in% colnames(confusion), confusion["0", "0"], 0)
+  FP <- ifelse("0" %in% rownames(confusion) & "1" %in% colnames(confusion), confusion["0", "1"], 0)
+  FN <- ifelse("1" %in% rownames(confusion) & "0" %in% colnames(confusion), confusion["1", "0"], 0)
+  
+  # Point estimation
+  sensitivity <- TP / (TP + FN)
+  specificity <- TN / (TN + FP)
+  accuracy <- (TP + TN) / sum(confusion)
+  ppv <- TP / (TP + FP)
+  npv <- TN / (TN + FN)
+  
+  # 95% confidence interval
+  sens_ci <- binomial_ci(TP, TP + FN)
+  spec_ci <- binomial_ci(TN, TN + FP)
+  acc_ci  <- binomial_ci(TP + TN, sum(confusion))
+  ppv_ci  <- binomial_ci(TP, TP + FP)
+  npv_ci  <- binomial_ci(TN, TN + FN)
+  
+  return(list(
+    confusion_matrix = confusion,
+    sensitivity = sensitivity, sens_ci = sens_ci,
+    specificity = specificity, spec_ci = spec_ci,
+    accuracy = accuracy, acc_ci = acc_ci,
+    ppv = ppv, ppv_ci = ppv_ci,
+    npv = npv, npv_ci = npv_ci,
+    TP = TP, TN = TN, FP = FP, FN = FN
+  ))
+}
+# Output function
+print_accuracy <- function(dataset_name, true_labels, predicted_probs, roc_obj) {
+  best_threshold <- coords(roc_obj, "best", best.method = "youden")$threshold
+  if (is.null(best_threshold) || length(best_threshold) == 0) best_threshold <- 0.5
+  
+  metrics <- calculate_metrics(true_labels, predicted_probs, best_threshold)
+  auc_val <- auc(roc_obj)
+  auc_ci_val <- auc_ci(roc_obj)
+  
+  # Formatted output: Value (95% CI: Lower limit - Upper limit)
+  cat("\n==========", dataset_name, "==========\n")
+  cat("cut-off :", round(best_threshold, 3), "\n")
+  cat("AUC:", round(auc_val, 3), " (95%CI:", round(auc_ci_val[1],3), "-", round(auc_ci_val[2],3), ")\n")
+  cat("Sensitivity:", round(metrics$sensitivity, 3), " (95%CI:", round(metrics$sens_ci[1],3), "-", round(metrics$sens_ci[2],3), ")\n")
+  cat("Specificity:", round(metrics$specificity, 3), " (95%CI:", round(metrics$spec_ci[1],3), "-", round(metrics$spec_ci[2],3), ")\n")
+  cat("Accuracy:", round(metrics$accuracy, 3), " (95%CI:", round(metrics$acc_ci[1],3), "-", round(metrics$acc_ci[2],3), ")\n")
+  cat("PPV:", round(metrics$ppv, 3), " (95%CI:", round(metrics$ppv_ci[1],3), "-", round(metrics$ppv_ci[2],3), ")\n")
+  cat("NPV:", round(metrics$npv, 3), " (95%CI:", round(metrics$npv_ci[1],3), "-", round(metrics$npv_ci[2],3), ")\n")
+  cat("Confusion matrix:\n")
+  print(metrics$confusion_matrix)
+}
+#ROC curve
+risk_score <- predict(fit, newx = x.train, type = "link")
+roc_curve<- roc(data$disease.status, risk_score)
+colors <- c("blue", "red","green") # Expand the color based on the number of curves
+labels <- c("Spesis VS Health") # Modify according to the dataset name
+# Draw the ROC curve and display the AUC value
+plot(roc_curve, 
+     col = colors[1], 
+     main = "ROC curve", 
+     lwd = 2,
+     print.auc = FALSE, 
+     xlab = "1-Specificity", 
+     ylab = "Sensitivity")
+# Calculate all AUC values and generate annotation text
+auc_values <- auc(roc_curve)
+annotations <- paste0(labels, " (AUC = ", round(auc_values, 3), ")")
+#Add the legend at the bottom right corner.
+legend("bottomright", 
+       legend = annotations,
+       col = colors,
+       lwd = 2,  # Line width
+       cex = 0.8,  # Font size
+       bty = "n") # bty="n" Remove the border
+#Save as PDF
+pdf("ROC-GSE65682.pdf", width = 6, height = 6)
+plot(roc_curve, 
+     col = colors[1], 
+     main = "ROC curve", 
+     lwd = 2,
+     print.auc = FALSE, 
+     xlab = "1-Specificity", 
+     ylab = "Sensitivity")
+# Calculate all AUC values and generate annotation text
+auc_values <- auc(roc_curve)
+annotations <- paste0(labels, " (AUC = ", round(auc_values, 3), ")")
+# Add the legend at the bottom right corner.
+legend("bottomright", 
+       legend = annotations,
+       col = colors,
+       lwd = 2,  # Line width
+       cex = 0.8,  # Font size
+       bty = "n") # bty="n" Remove the border
+dev.off()
+#The model's results on this dataset
+print_accuracy("GSE65682 (Sepsis VS Health)", 
+               data$disease.status, 
+               risk_score, 
+               roc_curve)
+#Calibration curve
+library(ResourceSelection)
+set.seed(123) # Set a fixed random seed, and the results can be repeated.
+# Extract the predicted values and the actual values
+pred_prob <- as.vector(1 / (1 + exp(-risk_score))) # Convert to 0-1 prediction probability
+y_true <- as.numeric(as.character(data$disease.status)) # Convert the true value to a numeric type (0/1)
+# Handle extreme values of predicted probabilities (to avoid logit being infinite)
+pred_prob[pred_prob < 1e-6] <- 1e-6
+pred_prob[pred_prob > 1 - 1e-6] <- 1 - 1e-6
+
+# Customize the Bootstrap calibration function 
+calibrate_glmnet <- function(pred_prob, y_true, n_boot = 1000, n_seq = 200) {
+  # Generate a sequence of predicted probabilities ranging from 0 to 1
+  pred_seq <- seq(0, 1, length.out = n_seq)
+  # Original observation probability (loess smoothing, without line)
+  loess_orig <- loess(y_true ~ pred_prob, span = 0.75, degree = 1, control = loess.control(surface = "direct"))
+  orig_smooth <- predict(loess_orig, newdata = data.frame(pred_prob = pred_seq))
+  # Limit the original probability to be within the range of 0 to 1 (to prevent the graph from overflowing)
+  orig_smooth[orig_smooth < 0] <- 0
+  orig_smooth[orig_smooth > 1] <- 1
+  # Bootstrap correction: Iteratively calculate the corrected smoothed probability
+  boot_smooth <- matrix(NA, nrow = n_boot, ncol = n_seq)
+  for (b in 1:n_boot) {
+    # Sampling with replacement
+    samp_idx <- sample(1:length(y_true), replace = TRUE)
+    p_samp <- pred_prob[samp_idx]
+    y_samp <- y_true[samp_idx]
+    # Perform loess smoothing on the sample data
+    loess_boot <- loess(y_samp ~ p_samp, span = 0.75, degree = 1,control = loess.control(surface = "direct"))
+    boot_smooth[b, ] <- predict(loess_boot, newdata = data.frame(p_samp = pred_seq))
+  }
+  # Calculate the probability after Bootstrap correction
+  corr_smooth <- 2 * orig_smooth - colMeans(boot_smooth, na.rm = TRUE)
+  # Limit the correction probability to be within the range of 0 to 1.
+  corr_smooth[corr_smooth < 0] <- 0
+  corr_smooth[corr_smooth > 1] <- 1
+  # Perform a mild secondary smoothing on the original curve
+  loess_orig2 <- loess(orig_smooth ~ pred_seq, span = 0.75, degree = 1)
+  orig_smooth <- predict(loess_orig2, newdata = data.frame(pred_seq = pred_seq))
+  orig_smooth[orig_smooth < 0] <- 0
+  orig_smooth[orig_smooth > 1] <- 1
+  # Perform a mild second-order smoothing on the calibration curve
+  loess_corr2 <- loess(corr_smooth ~ pred_seq, span = 0.75, degree = 1)
+  corr_smooth <- predict(loess_corr2, newdata = data.frame(pred_seq = pred_seq))
+  corr_smooth[corr_smooth < 0] <- 0
+  corr_smooth[corr_smooth > 1] <- 1
+  
+  return(data.frame(pred_seq, orig_smooth, corr_smooth))
+}
+
+#Perform calibration and obtain smooth curve data
+cal_smooth_df <- calibrate_glmnet(pred_prob, y_true, n_boot = 1000, n_seq = 200)
+par(pty = "s") # Enforced square drawing area
+# Initialize the canvas
+plot(0, 0, type = "n",
+     xlim = c(0,1), ylim = c(0,1),
+     xlab = "Predicted Probability",
+     ylab = "Observed Probability",
+     main = "Calibration Curve") 
+# Draw the corrected curve (in blue, smooth)
+lines(cal_smooth_df$pred_seq, cal_smooth_df$corr_smooth, col = "blue", lwd = 2)
+# Draw the original curve (in red, smooth)
+lines(cal_smooth_df$pred_seq, cal_smooth_df$orig_smooth, col = "red", lwd = 2)
+# Draw the ideal reference line (gray dotted line)
+abline(0, 1, lty = 2, lwd = 2, col = "grey")
+legend("bottomright",
+       legend = c("Bias-corrected","Original","Ideal"),
+       col = c("blue","red","grey"),
+       lty = c(1,1,2), lwd = 2, bty = "n")
+# Save as PDF file
+pdf("Calibration Curve-GSE65682.pdf", width = 6, height = 6) 
+par(pty = "s") # Enforced square drawing area
+# Initialize the canvas
+plot(0, 0, type = "n",
+     xlim = c(0,1), ylim = c(0,1),
+     xlab = "Predicted Probability",
+     ylab = "Observed Probability",
+     main = "Calibration Curve") 
+lines(cal_smooth_df$pred_seq, cal_smooth_df$corr_smooth, col = "blue", lwd = 2)
+lines(cal_smooth_df$pred_seq, cal_smooth_df$orig_smooth, col = "red", lwd = 2)
+abline(0, 1, lty = 2, lwd = 2, col = "grey")
+legend("bottomright",
+       legend = c("Bias-corrected","Original","Ideal"),
+       col = c("blue","red","grey"),
+       lty = c(1,1,2), lwd = 2, bty = "n")
+dev.off()
+#Calibration curve indicator output
+#Calculate the calibration intercept and calibration slope
+risk_score_prob <- 1 / (1 + exp(-risk_score)) 
+logit_pred <- log(risk_score_prob / (1 - risk_score_prob))  
+logit_pred[is.infinite(logit_pred)] <- sign(logit_pred[is.infinite(logit_pred)]) * 10
+calibration_model <- glm(data$disease.status ~logit_pred, 
+                         family = binomial)
+#Brier Score
+brier_score <- mean((data$disease.status - risk_score_prob)^2)
+prevalence <- mean(data$disease.status)
+brier_null <- prevalence * (1 - prevalence)
+brier_skill_score <- 1 - (brier_score / brier_null)
+#Output in tabular form
+calibration_metrics <- data.frame(
+  Metric = c("Calibration Intercept", "Calibration Slope", 
+              "Brier Score","Null Model Brier Score", "Brier Skill Score"),
+  Value = c(round(coef(calibration_model)[1], 3),
+            round(brier_score, 3),
+            round(brier_null, 3),
+            round(brier_skill_score, 3))
+)
+print(calibration_metrics, row.names = FALSE)
+#Drawing of the DCA curve
+library(rmda)
+# Convert the existing "risk_score" into a probability value
+data$pred_prob <- 1 / (1 + exp(-risk_score)) 
+baseline.model <- decision_curve(
+  disease.status ~ pred_prob,  
+  family = binomial,
+  data = data,
+  thresholds = seq(0, 1, by = 0.001),  
+  bootstraps = 1000,  
+  confidence.intervals = T, 
+  study.design = 'cohort',
+  policy = "opt-in" ,
+)
+plot_decision_curve(baseline.model, 
+                    curve.names = "4-Gene Model",
+                    confidence.intervals = FALSE,  # Do not display confidence interval
+                    cost.benefit.axis = FALSE,  # Do not display the loss-reward axes
+                    col = "blue",  # Curve color
+                    lty = 1,  # The line type is a solid line.
+                    lwd = 2,  # Line width
+                    legend.position = "none",  
+                    ylim = c(0, 1),  # The y-axis range is from 0 to 1.
+                    xlim = c(0, 1),  # X-axis range: 0 - 1
+                    xlab = "Risk Probability",  # X-axis label
+                    ylab = "Net Benefit",  # Y-axis label
+                    main = "DCA curve",
+                    standardize = FALSE)  
+# 保存为PDF文件
+pdf("DCA curve-GSE65682.pdf", width = 6, height = 6)
+plot_decision_curve(baseline.model, 
+                    curve.names = "4-Gene Model",
+                    confidence.intervals = FALSE,  # Do not display confidence interval
+                    cost.benefit.axis = FALSE,  # Do not display the loss-reward axes
+                    col = "blue",  # Curve color
+                    lty = 1,  # The line type is a solid line.
+                    lwd = 2,  # Line width
+                    legend.position = "none",  
+                    ylim = c(0, 1),  # The y-axis range is from 0 to 1.
+                    xlim = c(0, 1),  # X-axis range: 0 - 1
+                    xlab = "Risk Probability",  # X-axis label
+                    ylab = "Net Benefit",  # Y-axis label
+                    main = "DCA curve",
+                    standardize = FALSE) 
+dev.off()
+#CIC曲线绘制
+plot_clinical_impact(baseline.model,
+                     population.size = 1000,  # Assume the size of the target population to be 100
+                     cost.benefit.axis = TRUE,  # Display the loss-reward coordinate axes
+                     n.cost.benefits = 8,  # The number of scale marks on the loss-reward axis
+                     col = c("blue", "red"),  
+                     confidence.intervals = T,  # Display confidence interval
+                     lwd = 2,  # Line width
+                     xlab = "Risk Threshold",  # X-axis label
+                     ylab = "Number of High Risk",  # Y-axis label
+                     legend.position = "none",
+                     main = "CIC Curve")  
+# Curve color: Blue represents the number of high-risk individuals, while red represents the number of those #who are both high-risk and ill.
+pdf("CIC curve-GSE65682.pdf", width = 6, height = 6)
+plot_clinical_impact(baseline.model,
+                     population.size = 1000,  # Assume the size of the target population to be 100
+                     cost.benefit.axis = TRUE,  # Display the loss-reward coordinate axes
+                     n.cost.benefits = 8,  # The number of scale marks on the loss-reward axis
+                     col = c("blue", "red"),  
+                     confidence.intervals = T,  # Display confidence interval
+                     lwd = 2,  # Line width
+                     xlab = "Risk Threshold",  # X-axis label
+                     ylab = "Number of High Risk",  # Y-axis label
+                     legend.position = "none",
+                     main = "CIC Curve")  
+dev.off()
+
+
+#PBMC RNA-scq
+#SH and S+H represent Sepsis versus Health. 
+#SN and S+I represent Sepsis versus Common Infection; 
+#NH and N+H represent Common Infection versus Health ; 
+data_SH<- read.csv("PBMC RNA-scq_S+H_logistic.csv", row.names=1, check.names = FALSE)
+data_SH<- as.data.frame(data_SH)
+names(data_SH) <- gsub("-", "_", names(data_SH))
+data_SN<- read.csv("PBMC RNA-scq_S+I_logistic.csv", row.names=1, check.names = FALSE)
+data_SN<- as.data.frame(data_SN)
+names(data_SN) <- gsub("-", "_", names(data_SN))
+data_NH<- read.csv("PBMC RNA-scq_I+H_logistic.csv", row.names=1, check.names = FALSE)
+data_NH<- as.data.frame(data_NH)
+names(data_NH) <- gsub("-", "_", names(data_NH))
+x.train_SH <- data_SH[, geneName] %>% as.matrix()
+y.train_SH <- data_SH[, "disease.status"]  
+x.train_SN <- data_SN[, geneName] %>% as.matrix()
+y.train_SN <- data_SN[, "disease.status"]  
+x.train_NH <- data_NH[, geneName] %>% as.matrix()
+y.train_NH <- data_NH[, "disease.status"]  
+#Calculate the predicted score
+library(pROC)
+risk_score_SH <- predict(fit, newx = x.train_SH,  type = "link")
+risk_score_SN <- predict(fit, newx = x.train_SN,  type = "link")
+risk_score_NH <- predict(fit, newx = x.train_NH,  type = "link")
+# Calculate the ROC curve of the clinical data set
+roc_curve_SH<- roc(data_SH$disease.status, risk_score_SH)
+roc_curve_SN<- roc(data_SN$disease.status, risk_score_SN)
+roc_curve_NH<- roc(data_NH$disease.status, risk_score_NH)
+colors <- c("blue", "red","green") 
+labels <- c("Sepsis VS Health", "Sepsis VS Common Infection","Common Infection VS Health") 
+# Modify according to the dataset
+# Draw the ROC curve and display the AUC value
+plot(roc_curve_SH, 
+     col = colors[1], 
+     main = "ROC curve", 
+     lwd = 2,
+     print.auc = FALSE, 
+     xlab = "1-Specificity", 
+     ylab = "Sensitivity")
+plot(roc_curve_SN, 
+     add = TRUE, 
+     col = colors[2], 
+     lwd = 2, 
+     print.auc = FALSE)
+plot(roc_curve_NH, 
+     add = TRUE, 
+     col = colors[3], 
+     lwd = 2, 
+     print.auc = FALSE)
+# Calculate all AUC values and generate annotation text
+auc_values <- c(auc(roc_curve_SH), auc(roc_curve_SN), auc(roc_curve_NH))
+annotations <- paste0(labels, " (AUC = ", round(auc_values, 3), ")")
+# Add the legend at the bottom right corner.
+legend("bottomright", 
+       legend = annotations,
+       col = colors,
+       lwd = 2,  
+       cex = 0.8,  
+       bty = "n") 
+#Save as PDF
+pdf("ROC-PBMC RNA-scq.pdf", width = 6, height = 6)
+plot(roc_curve_SH, 
+     col = colors[1], 
+     main = "ROC curve", 
+     lwd = 2,
+     print.auc = FALSE, 
+     xlab = "1-Specificity", 
+     ylab = "Sensitivity")
+plot(roc_curve_SN, 
+     add = TRUE, 
+     col = colors[2], 
+     lwd = 2, 
+     print.auc = FALSE)
+plot(roc_curve_NH, 
+     add = TRUE, 
+     col = colors[3], 
+     lwd = 2, 
+     print.auc = FALSE)
+# Calculate all AUC values and generate annotation text
+auc_values <- c(auc(roc_curve_SH), auc(roc_curve_SN), auc(roc_curve_NH))
+annotations <- paste0(labels, " (AUC = ", round(auc_values, 3), ")")
+# Add the legend at the bottom right corner.
+legend("bottomright", 
+       legend = annotations,
+       col = colors,
+       lwd = 2,  
+       cex = 0.8,  
+       bty = "n") 
+dev.off()
+# Output the results of the validation set
+print_accuracy("Validation set Sepsis VS Health", 
+               data_SH$disease.status, 
+               risk_score_SH, 
+               roc_curve_SH)
+print_accuracy("Validation set Sepsis VS Common Infection", 
+               data_SN$disease.status, 
+               risk_score_SN, 
+               roc_curve_SN)
+print_accuracy("Validation set Common Infection VS Health", 
+               data_NH$disease.status, 
+               risk_score_NH, 
+               roc_curve_NH)
+#SH calibration curve, DCA, CIC
+#Calibration curve
+set.seed(123)
+pred_prob_SH <- as.vector(1 / (1 + exp(-risk_score_SH)))
+y_true_SH <- as.numeric(as.character(data_SH$disease.status))
+
+pred_prob_SH[pred_prob_SH < 1e-6] <- 1e-6
+pred_prob_SH[pred_prob_SH > 1 - 1e-6] <- 1 - 1e-6
+
+cal_smooth_df_SH <- calibrate_glmnet(pred_prob_SH, y_true_SH)
+# draw a diagram to check.
+par(pty = "s")
+plot(0,0,type="n",xlim=0:1,ylim=0:1,
+     xlab="Predicted Probability",ylab="Observed Probability",
+     main="Calibration Curve")
+lines(cal_smooth_df_SH$pred_seq, cal_smooth_df_SH$corr_smooth, col="blue",lwd=2)
+lines(cal_smooth_df_SH$pred_seq, cal_smooth_df_SH$orig_smooth, col="red",lwd=2)
+abline(0,1,lty=2,lwd=2,col="grey")
+legend("bottomright",c("Bias-corrected","Original","Ideal"),
+       col=c("blue","red","grey"),lty=c(1,1,2),lwd=2,bty="n")
+# Save as PDF
+pdf("Calibration-PBMC RNA-scqSH.pdf",width=6,height=6)
+par(pty = "s")
+plot(0,0,type="n",xlim=0:1,ylim=0:1,
+     xlab="Predicted Probability",ylab="Observed Probability",
+     main="Calibration Curve")
+lines(cal_smooth_df_SH$pred_seq, cal_smooth_df_SH$corr_smooth, col="blue",lwd=2)
+lines(cal_smooth_df_SH$pred_seq, cal_smooth_df_SH$orig_smooth, col="red",lwd=2)
+abline(0,1,lty=2,lwd=2,col="grey")
+legend("bottomright",c("Bias-corrected","Original","Ideal"),
+       col=c("blue","red","grey"),lty=c(1,1,2),lwd=2,bty="n")
+dev.off()
+#Calculate the calibration intercept and calibration slope
+risk_score_prob_SH <- 1 / (1 + exp(-risk_score_SH)) 
+logit_pred_SH <- log(risk_score_prob_SH / (1 - risk_score_prob_SH))  
+logit_pred_SH[is.infinite(logit_pred_SH)] <- sign(logit_pred_SH[is.infinite(logit_pred_SH)]) * calibration_model_SH <- glm(data_SH$disease.status ~ logit_pred_SH, 
+                            family = binomial)
+#Brier Score
+brier_score_SH <- mean((data_SH$disease.status - risk_score_prob_SH)^2)
+prevalence_SH <- mean(data_SH$disease.status)
+brier_null_SH <- prevalence_SH * (1 - prevalence_SH)
+brier_skill_score_SH <- 1 - (brier_score_SH / brier_null_SH)
+# Output in tabular form
+calibration_metrics_SH <- data.frame(
+  Metric = c("Calibration Intercept", "Calibration Slope", 
+              "Brier Score", "Null Model Brier Score", "Brier Skill Score"),
+  Value = c(round(coef(calibration_model_SH)[1], 3),
+            round(coef(calibration_model_SH)[2], 3),
+            round(brier_score_SH, 3),
+            round(brier_null_SH, 3),
+            round(brier_skill_score_SH, 3))
+)
+print(calibration_metrics_SH, row.names = FALSE)
+#DCA curve
+data_SH$pred_prob <- 1 / (1 + exp(-risk_score_SH))  
+baseline_model_SH <- decision_curve(
+  disease.status ~ pred_prob,  
+  family = binomial,
+  data = data_SH,
+  thresholds = seq(0, 1, by = 0.001),  
+  bootstraps = 1000,  
+  confidence.intervals = TRUE, 
+  study.design = 'cohort'
+)
+plot_decision_curve(baseline_model_SH, 
+                    curve.names = "4-Gene Model",
+                    confidence.intervals = FALSE,
+                    cost.benefit.axis = FALSE,
+                    col = "blue", 
+                    lty = 1, 
+                    lwd = 2, 
+                    legend.position = "none",
+                    ylim = c(0, 1), 
+                    xlim = c(0, 1), 
+                    xlab = "Risk Probability", 
+                    ylab = "Net Benefit", 
+                    main = "DCA curve",
+                    standardize = FALSE)
+# Save the DCA curve
+pdf("DCA-PBMC RNA-scqSH.pdf", width = 6, height = 6)
+plot_decision_curve(baseline_model_SH, 
+                    curve.names = "4-Gene Model",
+                    confidence.intervals = FALSE,
+                    cost.benefit.axis = FALSE,
+                    col = "blue", 
+                    lty = 1, 
+                    lwd = 2, 
+                    legend.position = "none",
+                    ylim = c(0, 1), 
+                    xlim = c(0, 1), 
+                    xlab = "Risk Probability", 
+                    ylab = "Net Benefit", 
+                    main = "DCA curve",
+                    standardize = FALSE)
+dev.off()
+#CIC curve
+plot_clinical_impact(baseline_model_SH,
+                     population.size = 1000,
+                     cost.benefit.axis = TRUE,
+                     n.cost.benefits = 8,
+                     col = c("blue", "red"),
+                     confidence.intervals = FALSE,
+                     lwd = 2,
+                     xlab = "Risk Threshold",
+                     ylab = "Number of High Risk",
+                     legend.position = "none",
+                     main = "CIC Curve")
+pdf("CIC-PBMC RNA-scqSH.pdf", width = 6, height = 6)
+plot_clinical_impact(baseline_model_SH,
+                     population.size = 1000,
+                     cost.benefit.axis = TRUE,
+                     n.cost.benefits = 8,
+                     col = c("blue", "red"),
+                     confidence.intervals = FALSE,
+                     lwd = 2,
+                     xlab = "Risk Threshold",
+                     ylab = "Number of High Risk",
+                     legend.position = "none",
+                     main = "CIC Curve")
+dev.off()
+#SN calibration curve, DCA, CIC
+#Calibration curve
+set.seed(123)
+pred_prob_SN <- as.vector(1 / (1 + exp(-risk_score_SN)))
+y_true_SN <- as.numeric(as.character(data_SN$disease.status))
+
+pred_prob_SN[pred_prob_SN < 1e-6] <- 1e-6
+pred_prob_SN[pred_prob_SN > 1 - 1e-6] <- 1 - 1e-6
+
+cal_smooth_df_SN <- calibrate_glmnet(pred_prob_SN, y_true_SN)
+par(pty = "s")
+plot(0,0,type="n",xlim=0:1,ylim=0:1,
+     xlab="Predicted Probability",ylab="Observed Probability",
+     main="Calibration Curve")
+lines(cal_smooth_df_SN$pred_seq, cal_smooth_df_SN$corr_smooth, col="blue",lwd=2)
+lines(cal_smooth_df_SN$pred_seq, cal_smooth_df_SN$orig_smooth, col="red",lwd=2)
+abline(0,1,lty=2,lwd=2,col="grey")
+legend("bottomright",c("Bias-corrected","Original","Ideal"),
+       col=c("blue","red","grey"),lty=c(1,1,2),lwd=2,bty="n")
+# Save as PDF
+pdf("Calibration-PBMC RNA-scqSN.pdf",width=6,height=6)
+par(pty = "s")
+plot(0,0,type="n",xlim=0:1,ylim=0:1,
+     xlab="Predicted Probability",ylab="Observed Probability",
+     main="Calibration Curve")
+lines(cal_smooth_df_SN$pred_seq, cal_smooth_df_SN$corr_smooth, col="blue",lwd=2)
+lines(cal_smooth_df_SN$pred_seq, cal_smooth_df_SN$orig_smooth, col="red",lwd=2)
+abline(0,1,lty=2,lwd=2,col="grey")
+legend("bottomright",c("Bias-corrected","Original","Ideal"),
+       col=c("blue","red","grey"),lty=c(1,1,2),lwd=2,bty="n")
+dev.off()
+#Calculate the calibration intercept and calibration slope
+risk_score_prob_SN <- 1 / (1 + exp(-risk_score_SN)) 
+logit_pred_SN <- log(risk_score_prob_SN / (1 - risk_score_prob_SN))  
+logit_pred_SN[is.infinite(logit_pred_SN)] <- sign(logit_pred_SN[is.infinite(logit_pred_SN)]) * 10
+calibration_model_SN <- glm(data_SN$disease.status ~ logit_pred_SN, 
+                            family = binomial)
+#Brier Score
+brier_score_SN <- mean((data_SN$disease.status - risk_score_prob_SN)^2)
+prevalence_SN <- mean(data_SN$disease.status)
+brier_null_SN <- prevalence_SN * (1 - prevalence_SN)
+brier_skill_score_SN <- 1 - (brier_score_SN / brier_null_SN)
+# Output in tabular form
+calibration_metrics_SN <- data.frame(
+  Metric = c("Calibration Intercept", "Calibration Slope", 
+             "Hosmer-Lemeshow P-value", "ICI", "Brier Score","Null Model Brier Score", "Brier Skill Score"),
+  Value = c(round(coef(calibration_model_SN)[1], 3),
+            round(coef(calibration_model_SN)[2], 3),
+            round(brier_score_SN, 3),
+            round(brier_null_SN, 3),
+            round(brier_skill_score_SN, 3))
+)
+print(calibration_metrics_SN, row.names = FALSE)
+#DCA curve
+data_SN$pred_prob <- 1 / (1 + exp(-risk_score_SN))  
+baseline_model_SN <- decision_curve(
+  disease.status ~ pred_prob,  
+  family = binomial,
+  data = data_SN,
+  thresholds = seq(0, 1, by = 0.001),  
+  bootstraps = 1000,  
+  confidence.intervals = TRUE, 
+  study.design = 'cohort'
+)
+plot_decision_curve(baseline_model_SN, 
+                    curve.names = "4-Gene Model",
+                    confidence.intervals = FALSE,
+                    cost.benefit.axis = FALSE,
+                    col = "blue", 
+                    lty = 1, 
+                    lwd = 2, 
+                    legend.position = "none",
+                    ylim = c(0, 1), 
+                    xlim = c(0, 1), 
+                    xlab = "Risk Probability", 
+                    ylab = "Net Benefit", 
+                    main = "DCA curve",
+                    standardize = FALSE)
+# Save the DCA curve
+pdf("DCA-PBMC RNA-scqSN.pdf", width = 6, height = 6)
+plot_decision_curve(baseline_model_SN, 
+                    curve.names = "4-Gene Model",
+                    confidence.intervals = FALSE,
+                    cost.benefit.axis = FALSE,
+                    col = "blue", 
+                    lty = 1, 
+                    lwd = 2, 
+                    legend.position = "none",
+                    ylim = c(0, 1), 
+                    xlim = c(0, 1), 
+                    xlab = "Risk Probability", 
+                    ylab = "Net Benefit", 
+                    main = "DCA curve",
+                    standardize = FALSE)
+dev.off()
+#CIC curve
+plot_clinical_impact(baseline_model_SN,
+                     population.size = 1000,
+                     cost.benefit.axis = TRUE,
+                     n.cost.benefits = 8,
+                     col = c("blue", "red"),
+                     confidence.intervals = FALSE,
+                     lwd = 2,
+                     xlab = "Risk Threshold",
+                     ylab = "Number of High Risk",
+                     legend.position = "none",
+                     main = "CIC Curve")
+pdf("CIC-PBMC RNA-scqSN.pdf", width = 6, height = 6)
+plot_clinical_impact(baseline_model_SN,
+                     population.size = 1000,
+                     cost.benefit.axis = TRUE,
+                     n.cost.benefits = 8,
+                     col = c("blue", "red"),
+                     confidence.intervals = FALSE,
+                     lwd = 2,
+                     xlab = "Risk Threshold",
+                     ylab = "Number of High Risk",
+                     legend.position = "none",
+                     main = "CIC Curve")
+dev.off()
+#NH calibration curve, DCA, CIC
+#Calibration curve
+set.seed(123)
+pred_prob_NH <- as.vector(1 / (1 + exp(-risk_score_NH)))
+y_true_NH <- as.numeric(as.character(data_NH$disease.status))
+
+pred_prob_NH[pred_prob_NH < 1e-6] <- 1e-6
+pred_prob_NH[pred_prob_NH > 1 - 1e-6] <- 1 - 1e-6
+
+cal_smooth_df_NH <- calibrate_glmnet(pred_prob_NH, y_true_NH)
+par(pty = "s")
+plot(0,0,type="n",xlim=0:1,ylim=0:1,
+     xlab="Predicted Probability",ylab="Observed Probability",
+     main="Calibration Curve")
+lines(cal_smooth_df_NH$pred_seq, cal_smooth_df_NH$corr_smooth, col="blue",lwd=2)
+lines(cal_smooth_df_NH$pred_seq, cal_smooth_df_NH$orig_smooth, col="red",lwd=2)
+abline(0,1,lty=2,lwd=2,col="grey")
+legend("bottomright",c("Bias-corrected","Original","Ideal"),
+       col=c("blue","red","grey"),lty=c(1,1,2),lwd=2,bty="n")
+# save as PDF
+pdf("Calibration-PBMC RNA-scq NH.pdf",width=6,height=6)
+par(pty = "s")
+plot(0,0,type="n",xlim=0:1,ylim=0:1,
+     xlab="Predicted Probability",ylab="Observed Probability",
+     main="Calibration Curve")
+lines(cal_smooth_df_NH$pred_seq, cal_smooth_df_NH$corr_smooth, col="blue",lwd=2)
+lines(cal_smooth_df_NH$pred_seq, cal_smooth_df_NH$orig_smooth, col="red",lwd=2)
+abline(0,1,lty=2,lwd=2,col="grey")
+legend("bottomright",c("Bias-corrected","Original","Ideal"),
+       col=c("blue","red","grey"),lty=c(1,1,2),lwd=2,bty="n")
+dev.off()
+#Calculate the calibration intercept and calibration slope
+risk_score_prob_NH <- 1 / (1 + exp(-risk_score_NH)) 
+logit_pred_NH <- log(risk_score_prob_NH / (1 - risk_score_prob_NH))  
+logit_pred_NH[is.infinite(logit_pred_NH)] <- sign(logit_pred_NH[is.infinite(logit_pred_NH)]) * 10
+calibration_model_NH <- glm(data_NH$disease.status ~ logit_pred_NH, 
+                            family = binomial)
+#Brier Score
+brier_score_NH <- mean((data_NH$disease.status - risk_score_prob_NH)^2)
+prevalence_NH <- mean(data_NH$disease.status)
+brier_null_NH <- prevalence_NH * (1 - prevalence_NH)
+brier_skill_score_NH <- 1 - (brier_score_NH / brier_null_NH)
+# Output in tabular form
+calibration_metrics_NH <- data.frame(
+  Metric = c("Calibration Intercept", "Calibration Slope", 
+             "Hosmer-Lemeshow P-value", "ICI", "Brier Score", "Null Model Brier Score", "Brier Skill Score"),
+  Value = c(round(coef(calibration_model_NH)[1], 3),
+            round(coef(calibration_model_NH)[2], 3),
+            round(brier_score_NH, 3),
+            round(brier_null_NH, 3),
+            round(brier_skill_score_NH, 3))
+)
+print(calibration_metrics_NH, row.names = FALSE)
+#DCA curve
+data_NH$pred_prob <- 1 / (1 + exp(-risk_score_NH))  
+baseline_model_NH <- decision_curve(
+  disease.status ~ pred_prob,  
+  family = binomial,
+  data = data_NH,
+  thresholds = seq(0, 1, by = 0.001),  
+  bootstraps = 1000,  
+  confidence.intervals = TRUE, 
+  study.design = 'cohort'
+)
+plot_decision_curve(baseline_model_NH, 
+                    curve.names = "4-Gene Model",
+                    confidence.intervals = FALSE,
+                    cost.benefit.axis = FALSE,
+                    col = "blue", 
+                    lty = 1, 
+                    lwd = 2, 
+                    legend.position = "none",
+                    ylim = c(0, 1), 
+                    xlim = c(0, 1), 
+                    xlab = "Risk Probability", 
+                    ylab = "Net Benefit", 
+                    main = "DCA curve",
+                    standardize = FALSE)
+# save as DCA curve
+pdf("DCA-PBMC RNA-scq NH.pdf", width = 6, height = 6)
+plot_decision_curve(baseline_model_NH, 
+                    curve.names = "4-Gene Model",
+                    confidence.intervals = FALSE,
+                    cost.benefit.axis = FALSE,
+                    col = "blue", 
+                    lty = 1, 
+                    lwd = 2, 
+                    legend.position = "none",
+                    ylim = c(0, 1), 
+                    xlim = c(0, 1), 
+                    xlab = "Risk Probability", 
+                    ylab = "Net Benefit", 
+                    main = "DCA curve",
+                    standardize = FALSE)
+dev.off()
+#CIC curve
+plot_clinical_impact(baseline_model_NH,
+                     population.size = 1000,
+                     cost.benefit.axis = TRUE,
+                     n.cost.benefits = 8,
+                     col = c("blue", "red"),
+                     confidence.intervals = FALSE,
+                     lwd = 2,
+                     xlab = "Risk Threshold",
+                     ylab = "Number of High Risk",
+                     legend.position = "none",
+                     main = "CIC Curve")
+pdf("CIC-PBMC RNA-scq NH.pdf", width = 6, height = 6)
+plot_clinical_impact(baseline_model_NH,
+                     population.size = 1000,
+                     cost.benefit.axis = TRUE,
+                     n.cost.benefits = 8,
+                     col = c("blue", "red"),
+                     confidence.intervals = FALSE,
+                     lwd = 2,
+                     xlab = "Risk Threshold",
+                     ylab = "Number of High Risk",
+                     legend.position = "none",
+                     main = "CIC Curve")
+dev.off()
+
+#The output code for other validation set results is as follows. Modify the names of the necessary validation #sets and comparison groups, and make necessary deletions and modifications.
+#The comparison model code is as follows

@@ -1,0 +1,276 @@
+# Merge the datasets to obtain the p-values of the top 5000 protein-coding genes in FPKM, facilitating the #creation of a volcano plot
+library(tidyverse)
+data <- read.csv("Top 5000 - Protein-coding genes in FPKM-log2Transformation.csv", row.names = 1)
+data1 <- read.csv("Sepsis_PBMCvsHC_PBMC_deg.csv")
+data <- data %>%rownames_to_column("Gene")
+final_results <- dplyr::inner_join(data, data1, by = "Gene")
+write.csv(final_results, "Sepsis_PBMCvsHC_PBMC_genes_counts_5000FPKM_all.csv", row.names = FALSE)
+
+data <- read.csv("Top 5000 - Protein-coding genes in FPKM-log2Transformation.csv", row.names = 1)
+data1 <- read.csv("Sepsis_PBMCvsInf_PBMC_deg.csv")
+data <- data %>%rownames_to_column("Gene")
+final_results <- dplyr::inner_join(data, data1, by = "Gene")
+write.csv(final_results, "Sepsis_PBMCvsInf_PBMC_genes_counts_5000FPKM_all.csv", row.names = FALSE)
+
+# Create a volcano chart comparing Sepsis and Health
+library(ggplot2)
+library(dplyr)
+library(readr)
+# Read data
+data <- read_csv("Sepsis_PBMCvsHC_PBMC_genes_counts_5000FPKM_all.csv")
+# Grouping + Manually Specifying Factor Order
+data <- data %>%
+  mutate(
+    group = case_when(
+      padj < 0.05 & log2FoldChange > 1 ~ "UP",
+      padj < 0.05 & log2FoldChange < -1 ~ "DOWN",
+      TRUE ~ "NO"
+    ),
+    # Convert "group" to a factor, with the order forced to be "UP" → "DOWN" → "NO"
+    group = factor(group, levels = c("UP", "DOWN", "NO"))
+  )
+# Count the quantity
+up <- sum(data$group == "UP")
+down <- sum(data$group == "DOWN")
+no <- sum(data$group == "NO")
+# Color (in the same order and as a factor)
+cols <- c("UP" = "red", "DOWN" = "blue", "NO" = "gray")
+labs <- c("UP" = paste0("UP ", up),
+          "DOWN" = paste0("DOWN ", down),
+          "NO" = paste0("NO ", no))
+# Drawing
+ggplot(data, aes(x = log2FoldChange, y = -log10(padj), color = group)) +
+  geom_point(alpha = 0.7, size = 1.8) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", linewidth = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", linewidth = 0.5) +
+  scale_color_manual(values = cols, labels = labs) +
+  labs(x = "log2FoldChange",
+       y = "-log10(adjusted p-value)",
+       color = "padj < 0.05\n|logFC| > 1") +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Sepsis vs Health")
+# Save Volcano Map
+ggsave("Sepsis vs Health Volcano map.pdf", device = "pdf", width = 6, height = 6, dpi = 300)
+# ggplot saves PDFs using ggsave for convenience
+
+# Create a volcano chart comparing Sepsis and Common Infection
+library(ggplot2)
+library(dplyr)
+library(readr)
+# Read data
+data <- read_csv("Sepsis_PBMCvsInf_PBMC_genes_counts_5000FPKM_all.csv")
+# Grouping + Manually Specifying Factor Order
+data <- data %>%
+  mutate(
+    group = case_when(
+      padj < 0.05 & log2FoldChange > 1 ~ "UP",
+      padj < 0.05 & log2FoldChange < -1 ~ "DOWN",
+      TRUE ~ "NO"
+    ),
+     # Convert "group" to a factor, with the order forced to be "UP" → "DOWN" → "NO"
+    group = factor(group, levels = c("UP", "DOWN", "NO"))
+  )
+# Count the quantity
+up <- sum(data$group == "UP")
+down <- sum(data$group == "DOWN")
+no <- sum(data$group == "NO")
+# Color (in the same order and as a factor)
+cols <- c("UP" = "red", "DOWN" = "blue", "NO" = "gray")
+labs <- c("UP" = paste0("UP ", up),
+          "DOWN" = paste0("DOWN ", down),
+          "NO" = paste0("NO ", no))
+# Drawing
+ggplot(data, aes(x = log2FoldChange, y = -log10(padj), color = group)) +
+  geom_point(alpha = 0.7, size = 1.8) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", linewidth = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", linewidth = 0.5) +
+  scale_color_manual(values = cols, labels = labs) +
+  labs(x = "log2FoldChange",
+       y = "-log10(adjusted p-value)",
+       color = "padj < 0.05\n|logFC| > 1") +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Sepsis VS Common Infection")
+#Save Volcano Map
+ggsave("Sepsis VS Common Infection Volcano map.pdf", device = "pdf", width = 6, height = 6, dpi = 300)
+
+#Drawing of a Venn diagram
+library(venn)
+library(purrr)
+#Read data
+data <- read.csv("基因分组.csv", stringsAsFactors = FALSE, check.names = FALSE)
+#Create a Venn diagram list
+venn_list <- list(data[,1], data[,2])
+names(venn_list) <- colnames(data)[1:2]  # Automatically match column names
+venn_list <- map(venn_list, ~na.omit(.x[.x != ""]))  # Remove NA values and null entries
+#Draw a Venn diagram
+venn(
+  venn_list,
+  zcolor = c("blue", "red"),  # Red and blue color scheme
+  opacity = 0.5,              # Transparency
+  box = FALSE,                # No border/frame
+  ilcs = 1.5,                 # The size of the circle (core: indicating the number of genes)
+  sncs = 1,                 #Group name font size
+  counts = TRUE,              # Force display of the number of genes
+)
+#保存PDF
+pdf("Venn diagram.pdf", width = 6, height = 6)
+venn(
+  venn_list,
+  zcolor = c("blue", "red"),  # Red and blue color scheme
+  opacity = 0.5,              # Transparency
+  box = FALSE,                # No border/frame
+  ilcs = 1.5,                 # The size of the circle (core: indicating the number of genes)
+  sncs = 1,                 #Group name font size
+  counts = TRUE,              # Force display of the number of genes
+)
+dev.off()
+
+#Draw a heat map of the 114 genes
+library(pheatmap)
+# Read data
+expr <- read.csv("114 gene expression level - log2 transformation.csv", row.names = 1, check.names = FALSE)
+gene_group <- read.csv("114 gene information.csv", row.names = 1, check.names = FALSE)
+colnames(gene_group) <- "Gene_Group"
+sample_group <- read.csv("Sample grouping.csv", row.names = 1, check.names = FALSE)
+colnames(sample_group) <- "Sample_Group"
+# Standardization
+expr_scaled <- t(scale(t(expr)))
+# Automatic color matching
+sample_types <- unique(as.character(sample_group$Sample_Group))
+gene_types <- unique(as.character(gene_group$Gene_Group))
+
+ann_colors <- list(
+  Sample_Group = setNames(c("green", "yellow", "red"), sample_types),
+  Gene_Group = setNames(c("blue", "purple"), gene_types)
+)
+#Save as PDF
+pdf("Heat map.pdf", width = 6, height = 6)
+# 绘图
+pheatmap(
+  mat = expr_scaled,
+  annotation_col = sample_group,
+  annotation_row = gene_group,
+  annotation_colors = ann_colors,
+  
+  # Disable clustering and maintain the original order
+  cluster_rows = FALSE,#Genetic clustering
+  cluster_cols = FALSE,#Sample clustering
+  
+  treeheight_row = 0, 
+  treeheight_col = 0, 
+  
+  color = colorRampPalette(c("blue","white","red"))(100),
+  scale = "none",
+  border_color = NA,
+  show_rownames = F,
+  show_colnames = F,
+  fontsize = 10,
+  # Hidden column names for group annotations
+  annotation_names_col = FALSE,
+  annotation_names_row = FALSE
+)
+dev.off()
+
+
+#114-gene analysis. The detailed process of the analysis results can be found in the article's methods section.
+#GO analysis
+library(ggplot2)
+library(dplyr)
+#Read the file
+bp <- read.csv("114-GO-BP.csv", stringsAsFactors = FALSE)
+cc <- read.csv("114-GO-CC.csv", stringsAsFactors = FALSE)
+mf <- read.csv("114-GO-MF.csv", stringsAsFactors = FALSE)
+# Correctly select the top 5 significant pathways
+# Sort by LogP in ascending order (the smaller the value, the more significant it is), and select the top 5.
+bp_top5 <- bp %>% arrange(LogP) %>% head(5) %>% mutate(ONTOLOGY = "BP")
+cc_top5 <- cc %>% arrange(LogP) %>% head(5) %>% mutate(ONTOLOGY = "CC")
+mf_top5 <- mf %>% arrange(LogP) %>% head(5) %>% mutate(ONTOLOGY = "MF")
+# Merge
+go_all <- rbind(bp_top5, cc_top5, mf_top5)
+# 计算：-log10(pvalue)
+go_plot <- go_all %>%
+  rename(
+    Pathway = Description,
+    Count = X.GeneInGOAndHitList
+  ) %>%
+  mutate(
+    log10_p = LogP,                    # Original negative value
+    minus_log10_p = -log10_p,          # ✅ Positive numbers (the larger, the more significant)
+    Enrichment = minus_log10_p         # Use this for the X-axis
+  )
+# Sorting: Make the elements in the graph become more prominent from top to bottom.
+go_plot$Pathway <- factor(go_plot$Pathway,
+                          levels = go_plot$Pathway[order(-go_plot$log10_p)])
+
+#Draw a picture
+p <- ggplot(go_plot, aes(x = Enrichment, y = Pathway)) +
+  geom_point(aes(size = Count, color = minus_log10_p), shape = 19, alpha = 0.8) +
+  # Section: BP / CC / MF
+  facet_grid(ONTOLOGY ~ ., scales = "free_y", space = "free_y") +
+  # Color gradient: Green → Red (The color becomes redder as it gets larger, and the effect is more #prominent.)
+  scale_color_gradient(low = "blue", high = "red") +
+  # Full match of labels with example diagram
+  labs(
+    x = "Enrichment",
+    y = "",
+    color = "-log10(pvalue)",
+    size = "Count"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text.y = element_text(angle = -90, face = "bold"),
+    strip.background = element_rect(fill = "gray90"),
+    axis.text.y = element_text(size = 8, hjust = 1),
+    panel.grid = element_line(linetype = 2, colour = "gray80")
+  )
+# Display the picture
+print(p)
+# Save high-definition image
+ggsave("114-GO.pdf", p, width=6, height=6, dpi=300)
+
+#KEGG
+kegg <- read.csv("114-KEGG.csv", stringsAsFactors = FALSE)
+# Select the 15 most significant pathways
+kegg_top15 <- kegg %>%
+  arrange(LogP) %>% # The smaller the LogP value (the more negative), the more significant it is. Correct order
+  head(15) %>%              # Select the first 15 items.
+  rename(
+    Pathway = Description,  # Path name
+    Count = `GeneInGOAndHitList`  # The actual sequence names of the genes listed in the file
+  ) %>%
+  mutate(
+    minus_log10_p = -LogP,  # Convert to positive numbers: The larger the value, the more significant it is.
+    Enrichment = minus_log10_p
+  )
+# Arrange the items in the picture from top to bottom in the order of their significance.
+kegg_top15$Pathway <- factor(
+  kegg_top15$Pathway,
+  levels = kegg_top15$Pathway[order(-kegg_top15$LogP)]
+)
+#Draw a bubble chart
+p <- ggplot(kegg_top15, aes(x = Enrichment, y = Pathway)) +
+  geom_point(aes(size = Count, color = minus_log10_p), shape = 19, alpha = 0.8) +
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(
+    x = "Enrichment",
+    y = "",
+    color = "-log10(pvalue)",
+    size = "Count",
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.text.y = element_text(size = 9, hjust = 1),
+    panel.grid = element_line(linetype = 2, colour = "gray80")
+  )
+
+# Display the picture
+print(p)
+# Save high-definition PDF
+ggsave("114_KEGG.pdf", p, width = 6, height = 6, dpi = 300)
+
+#The SMH gene and the SM gene are associated with the 114 gene.

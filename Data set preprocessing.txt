@@ -1,0 +1,89 @@
+library(tidyverse)
+library(GEOquery)
+library(Biobase)
+#matrix data (.txt format file) of microarray datasets
+exp <- read.table(" ***series_matrix.txt.gz",#Dataset name
+                  comment.char = "!",  
+                  stringsAsFactors = FALSE,
+                  header = TRUE)
+dim(exp)
+exp[1:4, 1:4]    
+exp <- as.data.frame(exp)
+rownames(exp) <- exp$ID_REF
+exp$ID_REF <- NULL
+#or the FPKM value of the bulk-RNA sequencing dataset
+exp<- read.csv("**** norm_counts_FPKM_GRCh38.p13_NCBI.csv", row.names=1)#Dataset name
+
+#Check for any missing values and perform the deletion of those missing values.
+missing_summary <- data.frame(
+  "Number of missing genes" = sum(apply(exp, 1, function(x) any(is.na(x)))),
+  "Number of missing samples" = sum(apply(exp, 2, function(x) any(is.na(x)))),
+  "Total number of missing values" = sum(is.na(exp)),
+  "Proportion of missing values" = paste0(round(sum(is.na(exp)) / (nrow(exp) * ncol(exp)) * 100, 4), "%")
+)
+print(missing_summary)
+
+# Determine whether log transformation is necessary to ensure that the data remains normally distributed as in the training set.
+qx <- as.numeric(quantile(exp, c(0., 0.25, 0.5, 0.75, 0.99, 1.0), na.rm=T))
+LogC <- (qx[5] > 100) ||
+  (qx[6]-qx[1] > 50 && qx[2] > 0) ||
+  (qx[2] > 0 && qx[2] < 1 && qx[4] > 1 && qx[4] < 2)
+if (LogC) { exp[which(exp < 0)]<- NaN
+exp <- log2(exp+1)
+print("log2 transform finished")}else{print("log2 transform not needed")}
+
+#Read the annotation file corresponding to this GEO dataset
+#Download in advance
+ids <- read.table("*** .txt", sep = "\t", check.names = FALSE,
+                  stringsAsFactors = FALSE, header = TRUE, fill = TRUE, quote = "")
+#or the FPKM value of the bulk-RNA sequencing dataset
+ids<- read.csv("***.csv", row.names=1)
+
+#Clean the data
+ids$'  '<- sub("///.*", "", ids$' ***')#The column corresponding to the gene column in the annotation file
+ids$'  ' <- trimws(ids$' **** ')#The column corresponding to the gene column in the annotation file
+rownames(ids) <- ids[, 1]
+head(ids)
+length(unique(ids$'***'))#The column corresponding to the gene column in the annotation file
+tail(sort(table(ids$' *** ')))#The column corresponding to the gene column in the annotation file
+table(sort(table(ids$' *** ')))#The column corresponding to the gene column in the annotation file
+table(rownames(exp) %in% ids$ID)
+Gene_column <- ids[" *** "]#The column corresponding to the gene column in the annotation file
+Gene_column <- as.data.frame(Gene_column)
+rownames(exp) <- trimws(rownames(exp))  
+rownames(Gene_column) <- trimws(rownames(Gene_column))
+common_rows <- intersect(rownames(exp), rownames(Gene_column))
+exp <- exp[common_rows, , drop = FALSE]
+Gene_column <- Gene_column[common_rows, , drop = FALSE]
+Gene_column <- Gene_column[rownames(exp), , drop = FALSE]
+identical(rownames(Gene_column), rownames(exp)) # It should return TRUE
+exp1 <- cbind(exp,Gene_column)
+exp1 <- exp1 %>%
+  filter(!is.na(` *** `) & ` *** ` != "" & ` *** ` != "NA")# Remove rows where the Symbol column contains null values#The column corresponding to the gene column in the annotation file
+
+# Remove duplicate *** values and calculate the average for all columns except the *** column
+result <- exp1 %>%
+  group_by(` *** `) %>% #The column corresponding to the gene column in the annotation file
+  summarize(across(where(is.numeric), \(x) mean(x, na.rm = TRUE)))  result <- result %>%
+  filter(!is.na(`***`) & `***` != " " & ` *** ` != "NA")#The column corresponding to the gene column in the annotation file
+result <- as.data.frame(result)
+rownames(result) <- result$"Symbol"
+result$"***" <- NULL#The column corresponding to the gene column in the annotation file
+#save the data
+write.csv(result,file = "*** mean.csv")
+
+#Add the grouped data of dataset samples
+data <- read.csv("***mean.csv", row.names=1)#Dataset name
+clinical <- read.csv("clinical.csv", row.names=1)#Clinical data of the dataset
+data <- t(data)
+rownames(data) <- trimws(rownames(data)) 
+rownames(clinical) <- trimws(rownames(clinical))
+common_rows <- intersect(rownames(data), rownames(clinical))
+data <- data[common_rows, , drop = FALSE]
+clinical <- clinical[common_rows, , drop = FALSE]
+clinical <- clinical[rownames(data), , drop = FALSE]
+identical(rownames(clinical), rownames(data))  data1 <- cbind(data, clinical)
+data1$disease.status <- ifelse(data1$disease.status == "***", 0, 1)#Control group name
+data1$disease.status <- as.factor(data1$disease.status)
+write.csv(data1,file = "***_logistic.csv")
+

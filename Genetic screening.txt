@@ -1,0 +1,633 @@
+#Top 5000 - Protein-coding genes in FPKM
+Data<- read.csv("Top 5000 - Protein-coding genes in FPKM.csv", row.names=1)
+Data <- log2(Data + 1)
+write.csv(Data,"Top 5000 - Protein-coding genes in FPKM-log2Transformation.csv")
+
+# DESeq method for screening differentially expressed genes (results sourced from NuovaGene data)
+library(tidyverse)
+sepsis_vs_inf <- read.csv("Sepsis_PBMCvsInf_PBMC_deg_all.csv", row.names = 1)
+sepsis_vs_hc <- read.csv("Sepsis_PBMCvsHC_PBMC_deg_all.csv", row.names = 1)
+inf_vs_hc <- read.csv("Inf_PBMCvsHC_PBMC_deg_all.csv", row.names = 1)
+genes_sepsis_inf <- rownames(sepsis_vs_inf)
+genes_sepsis_hc <- rownames(sepsis_vs_hc)
+genes_inf_hc <- rownames(inf_vs_hc)
+
+# Identify the genes that are present in both Sepsis_PBMCvsInf_PBMC and Sepsis_PBMCvsHC_PBMC
+common_genes <- intersect(genes_sepsis_inf, genes_sepsis_hc)
+
+# Create the result data frame
+# Extract all the data of the common genes from the three datasets
+result <- data.frame(
+  row.names = common_genes,
+# Extract the data of common genes from sepsis_vs_inf
+  sepsis_vs_inf_log2FC = sepsis_vs_inf[common_genes, "log2FoldChange"],
+  sepsis_vs_inf_pvalue = sepsis_vs_inf[common_genes, "pvalue"],
+  sepsis_vs_inf_padj = sepsis_vs_inf[common_genes, "padj"],
+  sepsis_vs_inf_gene_strand = sepsis_vs_inf[common_genes, "gene_strand"],
+  sepsis_vs_inf_gene_biotype = sepsis_vs_inf[common_genes, "gene_biotype"],
+# Extract the data of common genes from sepsis_vs_hc
+  sepsis_vs_hc_log2FC = sepsis_vs_hc[common_genes, "log2FoldChange"],
+  sepsis_vs_hc_pvalue = sepsis_vs_hc[common_genes, "pvalue"],
+  sepsis_vs_hc_padj = sepsis_vs_hc[common_genes, "padj"],
+  sepsis_vs_hc_gene_strand = sepsis_vs_hc[common_genes, "gene_strand"],
+  sepsis_vs_hc_gene_biotype = sepsis_vs_hc[common_genes, "gene_biotype"],
+# Extract the data of common genes from inf_vs_hc
+  inf_vs_hc_log2FC = inf_vs_hc[common_genes, "log2FoldChange"],
+  inf_vs_hc_pvalue = inf_vs_hc[common_genes, "pvalue"],
+  inf_vs_hc_padj = inf_vs_hc[common_genes, "padj"],
+  inf_vs_hc_gene_strand = inf_vs_hc[common_genes, "gene_strand"],
+  inf_vs_hc_gene_biotype = inf_vs_hc[common_genes, "gene_biotype"]
+  )
+# Check whether the common genes are also present in Inf_PBMCvsHC_PBMC
+result$SMH_marker <- ifelse(common_genes %in% genes_inf_hc, "SMH", "SM")
+# Save the results to a CSV file
+write.csv(result, "Differential_genes_counts.csv")
+
+# Read the FPKM expression matrix data
+fpkm_data <- read.csv("Top 5000 - Protein-coding genes in FPKM.csv", row.names = 1)
+diff_genes <- rownames(result)
+common_genes_final <- intersect(diff_genes, rownames(fpkm_data))
+diff_subset <- result[common_genes_final, , drop = FALSE]
+fpkm_subset <- fpkm_data[common_genes_final, , drop = FALSE]
+final_merged <- cbind(diff_subset, fpkm_subset)
+write.csv(final_merged, "Differential_genes_counts_5000FPKM.csv")
+
+# Comparison of differentially expressed genes in the first 5000 of FPKM between sepsis patients and healthy controls, and between sepsis patients and patients with common infections
+library(tidyverse)
+library(dplyr)
+data <- read.csv("Top 5000 - Protein-coding genes in FPKM.csv", row.names = 1)
+data1 <- read.csv("Sepsis_PBMCvsInf_PBMC_deg_all.csv")
+data <- data %>%rownames_to_column("Gene")
+final_results <- dplyr::inner_join(data, data1, by = "Gene")
+write.csv(final_results, "Sepsis_PBMCvsInf_PBMC_genes_counts_5000FPKM.csv", row.names = FALSE)
+
+data <- read.csv("Top 5000 - Protein-coding genes in FPKM-log2Transformation.csv", row.names = 1)
+data1 <- read.csv("Sepsis_PBMCvsHC_PBMC_deg_all.csv")
+data <- data %>%rownames_to_column("Gene")
+final_results <- dplyr::inner_join(data, data1, by = "Gene")
+write.csv(final_results, "Sepsis_PBMCvsHC_PBMC_genes_counts_5000FPKM.csv", row.names = FALSE)
+
+# Conduct trend screening on the top 5000 differentially expressed genes based on their FPKM expression levels
+library(tidyverse)
+data<- read.csv("Differential_genes_5000FPKM.csv", row.names=1)
+library(clinfun)
+# Extract group information and process the dataset
+group_info <- as.character(data[1, ])
+gene_data <- data[-1, ]
+gene_data[] <- lapply(gene_data, as.numeric)# Confirm that the genetic data is of numerical type
+gene_matrix <- as.matrix(gene_data)
+group_levels <- c("Healthy", "Common Infection", "Sepsis")# Sequence of Defining Categories
+if(!all(group_info %in% group_levels)) {
+  print("Warning: Undefined groups detected!")
+  print(unique(group_info[!group_info %in% group_levels]))
+}# Check whether all the groups are within the defined levels
+group_factor <- factor(group_info, levels = group_levels, ordered = TRUE)
+group_numeric <- as.numeric(group_factor)
+# Create the result data frame
+results <- data.frame(
+  gene = rownames(gene_data),
+  JT_statistic = numeric(nrow(gene_data)),
+  p_value = numeric(nrow(gene_data)),
+  trend_direction = character(nrow(gene_data)),
+  stringsAsFactors = FALSE
+)
+# Conduct JT test for each gene
+for(i in 1:nrow(gene_matrix)) {
+  # Extract the expression value of the current gene
+  gene_expression <- gene_matrix[i, ]
+  # Remove Missing Values
+  valid_idx <- complete.cases(gene_expression, group_numeric)
+  if(sum(valid_idx) < 3) {
+    results$p_value[i] <- NA
+    results$JT_statistic[i] <- NA
+    results$trend_direction[i] <- "insufficient data"
+    next
+  }
+  gene_exp_valid <- gene_expression[valid_idx]
+  group_valid <- group_numeric[valid_idx]
+  # Conduct the Jonckheere-Terpstra test
+  tryCatch({
+    jt_result <- jonckheere.test(gene_exp_valid, group_valid, alternative = "two.sided")
+    # Save Results
+    results$JT_statistic[i] <- jt_result$statistic
+    results$p_value[i] <- jt_result$p.value
+    # Determine the direction based on the median trend of the expression values
+    medians <- tapply(gene_exp_valid, group_valid, median, na.rm = TRUE)
+    # Determine the overall trend
+    if(medians[1] < medians[3]) {  # Group One < Group Three
+      results$trend_direction[i] <- "positive"
+    } else if(medians[1] > medians[3]) {  # Group 1 > Group 3
+      results$trend_direction[i] <- "negative"
+    } else {
+      results$trend_direction[i] <- "no clear trend"
+    }
+    
+  }, error = function(e) {
+    results$JT_statistic[i] <<- NA
+    results$p_value[i] <<- NA
+    results$trend_direction[i] <<- "test failed"
+  })
+}
+# Add Bonferroni multiple test correction. Since there may be false positives in multiple tests, multiple test #correction should be performed. Subsequently, the p-values will be used after the correction.
+results$p_adjusted <- p.adjust(results$p_value, method = "bonferroni")
+# Add significance marking column
+results$significance <- ifelse(is.na(results$p_adjusted), "",
+                               ifelse(results$p_adjusted < 0.0001, "****",
+                                      ifelse(results$p_adjusted < 0.001, "***",
+                                             ifelse(results$p_adjusted < 0.01, "**",
+                                                    ifelse(results$p_adjusted < 0.05, "*",
+                                                           "ns")))))
+write.csv(results, "JT_test_all_genes.csv", row.names = FALSE)
+# Selecting significant genes
+sig_genes <- results[results$p_adjusted <= 0.05 & !is.na(results$p_adjusted), ]
+if(nrow(sig_genes) > 0) {
+ # ===== File 2: Results of Significant Genes (Sorted in Order of p_adjusted from Smallest to Largest) =====
+  sig_genes_sorted <- sig_genes[order(sig_genes$p_adjusted), ]
+  write.csv(sig_genes_sorted, "JT_test_significant_genes.csv", row.names = FALSE)
+  print(paste("File 2 saved: JT_test_significant_genes.csv (", nrow(sig_genes_sorted), " genes, sorted by significance)"))
+  
+  # =====File 3: Significant Positive Trends (if any)=====
+  positive_trend <- sig_genes_sorted[sig_genes_sorted$trend_direction == "positive", ]
+  if(nrow(positive_trend) > 0) {
+    write.csv(positive_trend, "JT_test_positive_trend.csv", row.names = FALSE)
+    print(paste("File 3 saved: JT_test_positive_trend.csv (", nrow(positive_trend), " genes, sorted by significance)"))
+  } else {
+    print("File 3: No positive trend significant genes found")
+  }
+  
+  # ===== File 4: Genes with a significant negative trend (if any)=====
+  negative_trend <- sig_genes_sorted[sig_genes_sorted$trend_direction == "negative", ]
+  if(nrow(negative_trend) > 0) {
+    write.csv(negative_trend, "JT_test_negative_trend.csv", row.names = FALSE)
+    print(paste("File 4 saved: JT_test_negative_trend.csv (", nrow(negative_trend), " genes, sorted by significance)"))
+  } else {
+    print("File 4: No negative trend significant genes found")
+  }
+  
+} else {
+  print("No significant genes found (FDR < 0.05)")
+  # If there are no significant genes, only keep file 1.
+}
+
+#Screen the gene data after trend filtering based on the degree of separation between groups and the magnitude of change
+#Calculate the genes with positive trends
+library(tidyverse)
+library(effsize)  # Used for calculating Cliff's Delta
+data<- read.csv("Differential_genes_5000FPKM.csv", row.names=1)
+data1<- read.csv("JT_test_positive_trend.csv", row.names=1)
+#Extract the group information and screen the genes
+group_info <- data[1, ]
+expression_data <- data[-1, ]
+expression_data <- expression_data %>%
+  mutate(across(everything(), as.numeric))# Convert to numeric type
+positive_genes <- rownames(data1)# Obtain the list of genes with positive trends
+filtered_expression <- expression_data[rownames(expression_data) %in% positive_genes, ]
+# Create grouping factors (note: after transposition, the column names correspond to the samples)
+groups <- factor(unlist(group_info), levels = c("Healthy", "Common Infection", "Sepsis"))
+# Obtain the sample indices for each group (note: group_info represents rows, corresponding to the columns of expression_data)
+healthy_cols <- which(groups == "Healthy")
+Common_cols <- which(groups == "Common Infection")
+sepsis_cols <- which(groups == "Sepsis")
+# Initialization result
+results <- data.frame(
+  Gene = rownames(filtered_expression),
+  log2FC_Sepsis_vs_Healthy = NA,
+  log2FC_Sepsis_vs_Common = NA,
+  log2FC_Common_vs_Healthy = NA,
+  Cliff_Delta_Sepsis_vs_Healthy = NA,
+  Cliff_Delta_Sepsis_vs_Common = NA,
+  Cliff_Delta_Common_vs_Healthy = NA,
+  PS_Sepsis_vs_Healthy = NA,
+  PS_Sepsis_vs_Common = NA,
+  PS_Common_vs_Healthy = NA,
+  stringsAsFactors = FALSE
+)
+# Define the functions for calculating Cliff's Delta and PS
+calculate_cliff_ps <- function(x, y) {
+  n1 <- length(x)
+  n2 <- length(y)
+  
+  greater <- 0
+  less <- 0
+  equal <- 0
+  
+  # Two-layer loop
+  for (i in 1:n1) {
+    for (j in 1:n2) {
+      if (x[i] > y[j]) {
+        greater <- greater + 1
+      } else if (x[i] < y[j]) {
+        less <- less + 1
+      } else {
+        equal <- equal + 1
+      }
+    }
+  }
+  
+  #The simplified form of Cliff's Delta = (P(X>Y) - P(X<Y)) / (P(X>Y) + P(X<Y) + P(X=Y))
+  # Standard definition：delta = (#(x>y) - #(x<y)) / (n1 * n2)
+  delta <- (greater - less) / (n1 * n2)
+  
+  # Probability of Superiority
+  # PS = P(X > Y) + 0.5 * P(X = Y)
+  ps <- greater / (n1 * n2) + 0.5 * (equal) / (n1 * n2)
+  
+  return(list(delta = delta, ps = ps))
+}
+
+# Batch calculation
+for (i in 1:nrow(filtered_expression)) {
+  
+  # Extract the expression values (note: filtered_expression is the gene × sample matrix)
+  healthy_expr <- as.numeric(filtered_expression[i, healthy_cols])
+  Common_expr <- as.numeric(filtered_expression[i, Common_cols])
+  sepsis_expr <- as.numeric(filtered_expression[i, sepsis_cols])
+  
+  # Calculate the median FC
+  epsilon <- 1e-10
+  med_h <- median(healthy_expr, na.rm = TRUE)
+  med_m <- median(Common_expr, na.rm = TRUE)
+  med_s <- median(sepsis_expr, na.rm = TRUE)
+  
+  results$log2FC_Sepsis_vs_Healthy[i] <- log2((med_s + epsilon) / (med_h + epsilon))
+  results$log2FC_Sepsis_vs_Common[i] <- log2((med_s + epsilon) / (med_m + epsilon))
+  results$log2FC_Common_vs_Healthy[i] <- log2((med_m + epsilon) / (med_h + epsilon))
+  
+  # Calculate Cliff's Delta and PS
+  ch <- calculate_cliff_ps(sepsis_expr, healthy_expr)
+  cm <- calculate_cliff_ps(sepsis_expr, Common_expr)
+  mh <- calculate_cliff_ps(Common_expr, healthy_expr)
+  
+  results$Cliff_Delta_Sepsis_vs_Healthy[i] <- ch$delta
+  results$PS_Sepsis_vs_Healthy[i] <- ch$ps
+  
+  results$Cliff_Delta_Sepsis_vs_Common[i] <- cm$delta
+  results$PS_Sepsis_vs_Common[i] <- cm$ps
+  
+  results$Cliff_Delta_Common_vs_Healthy[i] <- mh$delta
+  results$PS_Common_vs_Healthy[i] <- mh$ps
+}
+write.csv(results, "positive_Cliff_Delta_PS_log2FC_results_median.csv", row.names = FALSE)
+
+#Calculate negative trend genes
+library(tidyverse)
+library(effsize)  # Used for calculating Cliff's Delta
+data <- read.csv("Differential_genes_5000FPKM.csv", row.names = 1)
+data1 <- read.csv("JT_test_negative_trend.csv", row.names = 1)
+# Extract group information
+group_info <- data[1, ]
+expression_data <- data[-1, ] %>%
+  mutate(across(everything(), as.numeric))
+negative_genes <- rownames(data1)
+filtered_expression <- expression_data[rownames(expression_data) %in% negative_genes, ]
+# Create group factors
+groups <- factor(unlist(group_info), levels = c("Healthy", "Common Infection", "Sepsis"))
+healthy_cols <- which(groups == "Healthy")
+Common_cols <- which(groups == "Common Infection")
+sepsis_cols <- which(groups == "Sepsis")
+# Initialization result - The column names are exactly the same as the forward trend, but the calculation #direction is opposite to the forward direction.
+results <- data.frame(
+  Gene = rownames(filtered_expression),
+  log2FC_Sepsis_vs_Healthy = NA,
+  log2FC_Sepsis_vs_Common = NA,
+  log2FC_Common_vs_Healthy = NA,
+  Cliff_Delta_Sepsis_vs_Healthy = NA,
+  Cliff_Delta_Sepsis_vs_Common = NA,
+  Cliff_Delta_Common_vs_Healthy = NA,
+  PS_Sepsis_vs_Healthy = NA,
+  PS_Sepsis_vs_Common = NA,
+  PS_Common_vs_Healthy = NA,
+  stringsAsFactors = FALSE
+)
+# Computational function
+calculate_cliff_ps <- function(x, y) {
+  n1 <- length(x)
+  n2 <- length(y)
+  greater <- less <- equal <- 0
+  
+  for (i in 1:n1) {
+    for (j in 1:n2) {
+      if (x[i] > y[j]) greater <- greater + 1
+      else if (x[i] < y[j]) less <- less + 1
+      else equal <- equal + 1
+    }
+  }
+  
+  delta <- (greater - less) / (n1 * n2)
+  ps <- greater / (n1 * n2) + 0.5 * equal / (n1 * n2)
+  return(list(delta = delta, ps = ps))
+}
+
+# Batch calculation
+total_genes <- nrow(filtered_expression)
+for (i in 1:total_genes) {
+  
+  # Extract expression value
+  healthy_expr <- as.numeric(filtered_expression[i, healthy_cols])
+  Common_expr <- as.numeric(filtered_expression[i, Common_cols])
+  sepsis_expr <- as.numeric(filtered_expression[i, sepsis_cols])
+  
+  # Calculate the median
+  epsilon <- 1e-10
+  med_h <- median(healthy_expr, na.rm = TRUE)
+  med_m <- median(Common_expr, na.rm = TRUE)
+  med_s <- median(sepsis_expr, na.rm = TRUE)
+  
+  # FC calculation: Large/Small
+  # Negative trend：Healthy(大) > Common(中) > Sepsis(小)
+  results$log2FC_Sepsis_vs_Healthy[i] <- log2((med_h + epsilon) / (med_s + epsilon))   # Healthy/Sepsis
+  results$log2FC_Sepsis_vs_Common[i] <- log2((med_m + epsilon) / (med_s + epsilon))       # Common/Sepsis
+  results$log2FC_Common_vs_Healthy[i] <- log2((med_h + epsilon) / (med_m + epsilon))     # Healthy/Common
+  
+  # Calculate Cliff's Delta and PS (the ratio of the larger to the smaller)
+  sh <- calculate_cliff_ps(healthy_expr, sepsis_expr)
+  sm <- calculate_cliff_ps(Common_expr, sepsis_expr)
+  mh <- calculate_cliff_ps(healthy_expr, Common_expr)
+  results$Cliff_Delta_Sepsis_vs_Healthy[i] <- sh$delta   # Just at the moment
+  results$PS_Sepsis_vs_Healthy[i] <- sh$ps               # >0.5
+
+  results$Cliff_Delta_Sepsis_vs_Common[i] <- sm$delta
+  results$PS_Sepsis_vs_Common[i] <- sm$ps
+  
+  results$Cliff_Delta_Common_vs_Healthy[i] <- mh$delta
+  results$PS_Common_vs_Healthy[i] <- mh$ps
+}
+write.csv(results, "negative_Cliff_Delta_PS_log2FC_results_median.csv", row.names = FALSE)
+
+# Merge Data
+library(tidyverse)
+library(dplyr)
+positive_results <- read.csv("positive_Cliff_Delta_PS_log2FC_results_median.csv")
+negative_results <- read.csv("negative_Cliff_Delta_PS_log2FC_results_median.csv")
+combined_results <- rbind(positive_results, negative_results)
+combined_results <- combined_results[order(combined_results$Gene), ]
+write.csv(combined_results, "combined_Cliff_Delta_PS_log2FC_results.csv", row.names = FALSE)
+jt_genes <- read.csv("JT_test_significant_genes.csv", row.names = 1)
+combined_trend <- read.csv("combined_Cliff_Delta_PS_log2FC_results.csv")
+jt_data <- jt_genes %>%rownames_to_column("Gene")
+final_results <- jt_data %>%left_join(combined_trend, by = "Gene")
+write.csv(final_results, "significant_trend.csv", row.names = FALSE)
+
+# Conduct Kruskal-Wallis test and Dunn's post-hoc test on the selected geneslibrary(tidyverse)
+library(rstatix)
+library(dplyr)
+# Read data
+data <- read.csv("Differential_genes_5000FPKM.csv", row.names = 1)
+data1 <- read.csv("significant_trend_analysis.csv", row.names = 1)
+# Extract the group information and the list of genes
+selected_genes <- rownames(data1)
+group_info <- as.character(unlist(data[1, ]))
+expr_matrix <- data[-1, ]
+expr_matrix <- as.data.frame(lapply(expr_matrix, as.numeric), row.names = rownames(expr_matrix))
+# Transpose the expression matrix and add group information
+expr_data <- as.data.frame(t(expr_matrix))
+expr_data$Group <- factor(group_info, levels = c("Healthy", "Common Infection", "Sepsis"))
+expr_selected <- expr_data[, c(selected_genes, "Group"), drop = FALSE]
+# Create a predefined result box (initialized as NA)
+n_genes <- length(selected_genes)
+final_results <- data.frame(
+  KW_statistic = numeric(n_genes),
+  KW_p_value = numeric(n_genes),
+  KW_p_adjusted = numeric(n_genes),
+  KW_significance = character(n_genes),
+  Healthy_mean = numeric(n_genes),
+  Healthy_median = numeric(n_genes),
+  Healthy_sd = numeric(n_genes),
+  Common_mean = numeric(n_genes),
+  Common_median = numeric(n_genes),
+  Common_sd = numeric(n_genes),
+  Sepsis_mean = numeric(n_genes),
+  Sepsis_median = numeric(n_genes),
+  Sepsis_sd = numeric(n_genes),
+  Trend = character(n_genes),
+  # Dunn's test Z-value (placed before the p-value)
+  Dunn_Z_Sepsis_vs_Healthy = rep(NA_real_, n_genes),
+  Dunn_Z_Sepsis_vs_Common = rep(NA_real_, n_genes),
+  Dunn_Z_Common_vs_Healthy = rep(NA_real_, n_genes),
+  # Original p-value of Dunn's test
+  Dunn_p_value_Sepsis_vs_Healthy = rep(NA_real_, n_genes),
+  Dunn_p_value_Sepsis_vs_Common = rep(NA_real_, n_genes),
+  Dunn_p_value_Common_vs_Healthy = rep(NA_real_, n_genes),
+  # P-value after internal correction of Dunn's test (Bonferroni)
+  Dunn_p_adjusted_Sepsis_vs_Healthy = rep(NA_real_, n_genes),
+  Dunn_p_adjusted_Sepsis_vs_Common = rep(NA_real_, n_genes),
+  Dunn_p_adjusted_Common_vs_Healthy = rep(NA_real_, n_genes),
+  # Significance Marking (Based on the p-value after internal correction)
+  Dunn_significance_Sepsis_vs_Healthy = character(n_genes),
+  Dunn_significance_Sepsis_vs_Common = character(n_genes),
+  Dunn_significance_Common_vs_Healthy = character(n_genes),
+  stringsAsFactors = FALSE
+)
+
+rownames(final_results) <- selected_genes
+# Conduct Kruskal-Wallis test and Dunn's post-hoc testfor(i in seq_along(selected_genes)) {
+  gene <- selected_genes[i]
+  gene_data <- expr_selected %>%
+    select(all_of(gene), Group) %>%
+    rename(Expression = all_of(gene))
+  # Kruskal-Wallis Test
+  kw_test <- kruskal_test(Expression ~ Group, data = gene_data)
+  # Calculate the statistical quantities for each group
+  group_stats <- gene_data %>%
+    group_by(Group) %>%
+    summarise(
+      mean = mean(Expression, na.rm = TRUE),
+      median = median(Expression, na.rm = TRUE),
+      sd = sd(Expression, na.rm = TRUE),
+      .groups = 'drop'
+    )
+  # Fill in the basic results
+  final_results[i, "KW_statistic"] <- kw_test$statistic
+  final_results[i, "KW_p_value"] <- kw_test$p
+  # Fill in the statistical data for each group
+  final_results[i, "Healthy_mean"] <- group_stats$mean[group_stats$Group == "Healthy"]
+  final_results[i, "Healthy_median"] <- group_stats$median[group_stats$Group == "Healthy"]
+  final_results[i, "Healthy_sd"] <- group_stats$sd[group_stats$Group == "Healthy"]
+  
+  final_results[i, "Common_mean"] <- group_stats$mean[group_stats$Group == "Common Infection"]
+  final_results[i, "Common_median"] <- group_stats$median[group_stats$Group == "Common Infection"]
+  final_results[i, "Common_sd"] <- group_stats$sd[group_stats$Group == "Common Infection"]
+  
+  final_results[i, "Sepsis_mean"] <- group_stats$mean[group_stats$Group == "Sepsis"]
+  final_results[i, "Sepsis_median"] <- group_stats$median[group_stats$Group == "Sepsis"]
+  final_results[i, "Sepsis_sd"] <- group_stats$sd[group_stats$Group == "Sepsis"]
+  # Trend Analysis
+  h_med <- group_stats$median[group_stats$Group == "Healthy"]
+  m_med <- group_stats$median[group_stats$Group == "Common Infection"]
+  s_med <- group_stats$median[group_stats$Group == "Sepsis"]
+  
+  if(length(h_med) > 0 && length(m_med) > 0 && length(s_med) > 0) {
+    if(h_med > m_med && m_med > s_med) {
+      final_results[i, "Trend"] <- "negative"
+    } else if(h_med < m_med && m_med < s_med) {
+      final_results[i, "Trend"] <- "positive"
+    } else {
+      final_results[i, "Trend"] <- "ns"
+    }
+  } else {
+    final_results[i, "Trend"] <- "ns"
+  }
+  # Dunn's Multiple Comparison Test
+  dunn_result <- tryCatch({
+    # First, obtain the uncorrected original p-values
+    dunn_test(Expression ~ Group, data = gene_data, p.adjust.method = "none")
+  }, error = function(e) {
+    message(paste("Error in gene", gene, ":", e$message))
+    NULL
+  })
+  
+  if(!is.null(dunn_result) && nrow(dunn_result) > 0) {
+    # Sepsis vs Healthy
+    sep_hc <- dunn_result %>% 
+      filter((group1 == "Sepsis" & group2 == "Healthy") | 
+               (group1 == "Healthy" & group2 == "Sepsis"))
+    if(nrow(sep_hc) > 0) {
+      final_results[i, "Dunn_Z_Sepsis_vs_Healthy"] <- sep_hc$statistic[1]
+      final_results[i, "Dunn_p_value_Sepsis_vs_Healthy"] <- sep_hc$p[1]
+    }
+    # Sepsis vs Common Infection
+    sep_Common <- dunn_result %>% 
+      filter((group1 == "Sepsis" & group2 == "Common Infection") | 
+               (group1 == "Common Infection" & group2 == "Sepsis"))
+    if(nrow(sep_Common) > 0) {
+      final_results[i, "Dunn_Z_Sepsis_vs_Common"] <- sep_Common$statistic[1]
+      final_results[i, "Dunn_p_value_Sepsis_vs_Common"] <- sep_Common$p[1]
+    }
+    # Common Infection vs Healthy
+    Common_hc <- dunn_result %>% 
+      filter((group1 == "Common Infection" & group2 == "Healthy") | 
+               (group1 == "Healthy" & group2 == "Common Infection"))
+    if(nrow(Common_hc) > 0) {
+      final_results[i, "Dunn_Z_Common_vs_Healthy"] <- Common_hc$statistic[1]
+      final_results[i, "Dunn_p_value_Common_vs_Healthy"] <- Common_hc$p[1]
+    }
+    # Manually perform internal Bonferroni correction (3 comparisons within each gene)
+    n_comparisons <- 3  #There are three groups, and each group has two pairwise comparisons.
+    
+    final_results[i, "Dunn_p_adjusted_Sepsis_vs_Healthy"] <- 
+      min(final_results[i, "Dunn_p_value_Sepsis_vs_Healthy"] * n_comparisons, 1, na.rm = TRUE)
+    
+    final_results[i, "Dunn_p_adjusted_Sepsis_vs_Common"] <- 
+      min(final_results[i, "Dunn_p_value_Sepsis_vs_Common"] * n_comparisons, 1, na.rm = TRUE)
+    
+    final_results[i, "Dunn_p_adjusted_Common_vs_Healthy"] <- 
+      min(final_results[i, "Dunn_p_value_Common_vs_Healthy"] * n_comparisons, 1, na.rm = TRUE)
+  }
+}
+# Global Correction for the KW Test
+final_results$KW_p_adjusted <- p.adjust(final_results$KW_p_value, method = "bonferroni")
+# Add significance marking function
+add_significance <- function(p_values) {
+  ifelse(is.na(p_values), "NA",
+         ifelse(p_values < 0.0001, "****",
+                ifelse(p_values < 0.001, "***",
+                       ifelse(p_values < 0.01, "**",
+                              ifelse(p_values < 0.05, "*", "ns")))))
+}
+
+# Add significance markers to all p-values
+final_results$KW_significance <- add_significance(final_results$KW_p_adjusted)
+
+final_results$Dunn_significance_Sepsis_vs_Healthy <- add_significance(final_results$Dunn_p_adjusted_Sepsis_vs_Healthy)
+final_results$Dunn_significance_Sepsis_vs_Common <- add_significance(final_results$Dunn_p_adjusted_Sepsis_vs_Common)
+final_results$Dunn_significance_Common_vs_Healthy <- add_significance(final_results$Dunn_p_adjusted_Common_vs_Healthy)
+
+# Adjust column order
+column_order <- c(
+  "KW_statistic", "KW_p_value", "KW_p_adjusted", "KW_significance",
+  "Healthy_mean", "Healthy_median", "Healthy_sd",
+  "Common_mean", "Common_median", "Common_sd",
+  "Sepsis_mean", "Sepsis_median", "Sepsis_sd",
+  "Trend",
+  "Dunn_Z_Sepsis_vs_Healthy", "Dunn_p_value_Sepsis_vs_Healthy", 
+  "Dunn_p_adjusted_Sepsis_vs_Healthy", "Dunn_significance_Sepsis_vs_Healthy",
+  "Dunn_Z_Sepsis_vs_Common", "Dunn_p_value_Sepsis_vs_Common",
+  "Dunn_p_adjusted_Sepsis_vs_Common", "Dunn_significance_Sepsis_vs_Common",
+  "Dunn_Z_Common_vs_Healthy", "Dunn_p_value_Common_vs_Healthy",
+  "Dunn_p_adjusted_Common_vs_Healthy", "Dunn_significance_Common_vs_Healthy"
+)
+
+final_results <- final_results[, column_order]
+write.csv(final_results, "KW_test_results.csv")
+
+# Extract the dataset and the data of the public dataset - perform log2 transformation on the data
+library(tidyverse)
+library(dplyr)
+data <- read.csv("significant.csv", row.names = 1,fileEncoding = "GBK",check.names = T)
+data1 <- read.csv("***mean.csv")#Dataset name
+data <- data %>%rownames_to_column("Gene")
+final_results <- data %>%left_join(data1, by = "Gene")
+write.csv(final_results, "gse57065logistic.csv", row.names = FALSE)
+
+#Clinical dataset and calculation of AUC for individual markers in GSE65682 and GSE57065
+library(pROC)
+library(tidyverse)
+data <- read.csv("***logistic.csv", row.names = 1)Dataset name
+data$disease.status <- as.factor(data$disease.status)
+gene_names <- colnames(data)[-ncol(data)]
+# Create an empty data frame to store the results, maintaining the original order
+results <- data.frame(
+  Gene = gene_names,
+  AUC = NA_real_,
+  Sensitivity = NA_real_,
+  Specificity = NA_real_,
+  Accuracy = NA_real_,
+  PPV = NA_real_,
+  NPV = NA_real_,
+  Best_Cutoff = NA_real_,
+  Status = "Pending",  
+  stringsAsFactors = FALSE
+)
+# Calculate various indicators for each gene
+for (i in 1:length(gene_names)) {
+  gene <- gene_names[i]
+  # Check if it is a constant (all values are the same)
+  if (length(unique(data[[gene]])) == 1) {
+    results$Status[i] <- "Constant values - cannot compute ROC"
+    next
+  }
+  # Check for missing values
+  if (any(is.na(data[[gene]]))) {
+    na_count <- sum(is.na(data[[gene]]))
+    results$Status[i] <- paste("Has", na_count, "missing values")
+  }
+  # Attempt to calculate the ROC curve and AUC
+  tryCatch({
+    # Create an ROC object
+    roc_obj <- roc(data$disease.status ~ data[[gene]], quiet = TRUE)
+    # Obtain AUC
+    results$AUC[i] <- auc(roc_obj)
+    # Obtain the optimal threshold and the corresponding indicators
+    best_coords <- coords(roc_obj, "best", best.method = "youden", ret = "all")
+    # Extract various indicators
+    results$Best_Cutoff[i] <- best_coords$threshold[1]  
+    results$Sensitivity[i] <- best_coords$sensitivity[1]
+    results$Specificity[i] <- best_coords$specificity[1]
+    results$Accuracy[i] <- best_coords$accuracy[1]
+    results$PPV[i] <- best_coords$ppv[1]
+    results$NPV[i] <- best_coords$npv[1]
+    results$Status[i] <- "Success"
+    
+  }, error = function(e) {
+    # Directly update "results" using "i"
+    results[i, "Status"] <<- paste("Error:", conditionMessage(e))
+  })
+}
+write.csv(results, "AUC.csv", row.names = FALSE)
+#Extract the dataset and the data of the public dataset
+library(tidyverse)
+library(dplyr)
+data <- read.csv("significant.csv", row.names = 1,fileEncoding = "GBK",check.names = T)
+data1 <- read.csv("Differential_genes_counts.csv")
+data <- data %>%rownames_to_column("Gene")
+final_results <- data %>%left_join(data1, by = "Gene")
+write.csv(final_results, "significant1.csv", row.names = FALSE)
+
+#Store the log2-transformed gene data
+library(tidyverse)
+library(dplyr)
+data <- read.csv("significant1.csv", row.names = 1)
+data1 <- read.csv("Top 5000 - Protein-coding genes in FPKM-log2Transformation.csv")
+data <- data %>%rownames_to_column("Gene")
+final_results <- data %>%left_join(data1, by = "Gene")
+write.csv(final_results, "114 gene expression level - log2 transformation.csv", row.names = FALSE)
