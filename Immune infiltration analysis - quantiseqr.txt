@@ -1,0 +1,217 @@
+library(quantiseqr)
+library(tidyverse)
+fpkm_matrix <- read.csv("gene_fpkm.csv", row.names = 1, check.names = F)
+# Run quanTIseq (Note: FPKM can be used directly, but ensure it is on a linear scale, not log scale)
+# tumor = FALSE  because the sample is PBMC/whole blood, not tumor tissue
+results_quantiseq <- run_quantiseq(
+  expression_data = fpkm_matrix,  # FPKM matrix, rows represent genes, columns represent samples
+  is_arraydata = FALSE,           # RNA-seq
+  is_tumordata = FALSE,           # Non-tumor data
+  scale_mRNA = TRUE               
+)
+# Behavioral samples, listed as cell types
+quantiseq_res <- results_quantiseq[, -1] 
+write.table(quantiseq_res, "quantiseq.res.txt", sep = "\t", row.names = TRUE, col.names = TRUE, quote = FALSE)
+
+#Rainbow chart
+quantiseq.res <- read.table("quantiseq.res.txt", sep = "\t", row.names = 1, header=T)
+pdf("Rainbow chart.pdf", width = 6, height = 6)
+mycol <- ggplot2::alpha(rainbow(ncol(quantiseq.res)), 0.7)
+par(
+  bty = "o", 
+  mgp = c(2.5, 0.3, 0), 
+  mar = c(4, 4, 2, 8),  
+  tcl = -.25, 
+  las = 1, 
+  xpd = TRUE  
+)
+barplot(
+  as.matrix(t(quantiseq.res)),
+  border = NA,
+  names.arg = rep("", nrow(quantiseq.res)),
+  yaxt = "n",
+  ylab = "Relative percentage",
+  col = mycol,
+  space = 0  
+)
+axis(
+  side = 2, 
+  at = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+  labels = c("0%", "20%", "40%", "60%", "80%", "100%"),
+  cex.axis = 1.2
+)
+legend(
+  x = par("usr")[2] + 0.5,  
+  y = par("usr")[4],
+  legend = colnames(quantiseq.res),
+  fill = mycol,
+  cex = 0.8,
+  border = NA,
+  bty = "n",
+  y.intersp = 0.8,
+  x.intersp = 0.5,
+  xpd = TRUE  
+)
+dev.off()
+
+#Box plot
+library(ggpubr)
+library(ggsci)
+library(rstatix)
+library(tidyverse)
+quantiseq.res <- read.table("quantiseq.res.txt", sep="\t", row.names=1, header=T)
+group <- read.csv("Sample grouping.csv", row.names=1, stringsAsFactors=F)
+colnames(group) <- "group"
+quantiseq.res$group <- group[rownames(quantiseq.res), "group"]
+plot_data <- quantiseq.res %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(cols = -c(sample,group), names_to="CellType", values_to="Fraction")
+
+plot_data$group <- factor(plot_data$group, levels = c("Healthy","Common Infection","Sepsis"))
+my_col <- c("Healthy"="green", "Common Infection"="blue", "Sepsis"="red")
+
+comp <- list(c("Healthy","Common Infection"),
+             c("Healthy","Sepsis"),
+             c("Common Infection","Sepsis"))
+kw_results <- plot_data %>%
+  group_by(CellType) %>%
+  summarise(
+    KW_p_value = kruskal.test(Fraction ~ group)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    KW_p_signif = case_when(
+      KW_p_value < 0.0001 ~ "****",
+      KW_p_value < 0.001 ~ "***",
+      KW_p_value < 0.01 ~ "**",
+      KW_p_value < 0.05 ~ "*",
+      TRUE ~ "ns"
+    )
+  )
+
+
+wilcox_results <- plot_data %>%
+  group_by(CellType) %>%
+  pairwise_wilcox_test(
+    Fraction ~ group,
+    p.adjust.method = "BH"  
+  ) %>%
+  select(CellType, group1, group2, p, p.adj, p.adj.signif)
+
+write.csv(kw_results, "KW test result - Differences between immune cell groups.csv", row.names = FALSE)
+write.csv(wilcox_results, "Pairwise Wilcoxon test results_ Differences between immune cell groups.csv", row.names = FALSE)
+
+ggboxplot(plot_data, x="CellType", y="Fraction", fill="group", palette = my_col) +
+  
+  
+  stat_compare_means(aes(group=group), method="kruskal.test", label="p.signif") +
+  
+ 
+  stat_compare_means(
+    aes(group=group),
+    method = "wilcox.test",
+    comparisons = comp,    
+    label = "p.signif",    
+    hide.ns = T           
+  ) +
+  
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+ggsave("Comparison chart of immune infiltration in the three groups.pdf", width=6, height=6)
+
+#Correlation bubble heatmap
+library(corrplot)
+library(ggplot2)
+library(reshape2)
+library(RColorBrewer)
+quantiseq.res <- read.table("quantiseq.res.txt", sep="\t", row.names=1, header=T, check.names=F)
+corr_data <- quantiseq.res  
+cor_matrix <- cor(corr_data, method = "spearman")
+cor_long <- melt(cor_matrix)
+colnames(cor_long) <- c("Var1", "Var2", "correlation")
+cor_long$Var1 <- factor(cor_long$Var1, levels = colnames(quantiseq.res))
+cor_long$Var2 <- factor(cor_long$Var2, levels = colnames(quantiseq.res))
+ggplot(cor_long, aes(x = Var2, y = Var1, fill = correlation, size = abs(correlation))) +
+  geom_point(shape = 21, color = "white", stroke = 0.3) +  
+  scale_fill_gradient2(
+    low = "blue",    
+    mid = "white",     
+    high = "red",    
+    midpoint = 0,
+    limits = c(-1, 1)
+  ) +
+  scale_size_continuous(
+    range = c(1, 6),  
+    limits = c(0, 1),
+    guide = "none"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_blank(),
+    panel.grid = element_line(color = "gray90"),
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  ) +
+  labs(fill = "Correlation")
+write.csv(cor_matrix, "Immune cell correlation coefficient matrix.csv", row.names = T)
+ggsave("Immune cell-related heatmap.pdf", width = 6, height = 6, dpi = 300)
+
+
+#Immune cell-related forest plot
+library(tidyverse)
+library(ggplot2)
+expr <- read.csv("gene_fpkm-去重.csv", row.names = 1, check.names = F, stringsAsFactors = F)
+expr <- as.data.frame(t(expr))
+expr <- as.data.frame(lapply(expr, as.numeric))  
+rownames(expr) <- colnames(read.csv("gene_fpkm-去重.csv", row.names = 1, check.names = F))  
+
+quantiseq.res <- read.table("quantiseq.res.txt", sep="\t", row.names=1, header=T, check.names=F)
+quantiseq.res[] <- lapply(quantiseq.res, as.numeric) 
+common_samples <- intersect(rownames(expr), rownames(quantiseq.res))
+expr <- expr[common_samples, ]
+quantiseq.res <- quantiseq.res[common_samples, ]
+
+gene_name <- "***"# Specified Gene
+
+gene_data <- expr[[gene_name]]
+
+cor_res <- map_dfr(colnames(quantiseq.res), function(cell){
+  ct <- cor.test(gene_data, quantiseq.res[[cell]], method = "spearman")
+  data.frame(Cell = cell, R = ct$estimate, P = ct$p.value)
+})
+cor_res <- cor_res %>% arrange(R)
+cor_res$Cell <- factor(cor_res$Cell, levels = cor_res$Cell)
+
+ggplot(cor_res, aes(x=R, y=Cell)) +
+  geom_vline(xintercept=0, linetype="dashed", color="gray") +
+  ）
+  geom_errorbar(
+    aes(xmin=pmin(R,0), xmax=pmax(R,0)),
+    orientation="y", width=0.2, linewidth=0.8, color="black"
+  ) +
+  
+  geom_point(
+    aes(fill=P<0.05),
+    size=5, shape=21, color="black", stroke=0.8
+  ) +
+  
+  geom_text(
+    aes(x=0.85, label=ifelse(P<0.001, "<0.001", round(P,3)), color=P<0.05),
+    hjust=0, size=3.8
+  ) +
+  
+  scale_fill_manual(values=c("FALSE"="blue","TRUE"="red"), guide="none") +
+  scale_color_manual(values=c("FALSE"="black","TRUE"="red"), guide="none") +
+  
+  theme(panel.background = element_rect(fill = "gray100"),
+        panel.grid.major = element_line(color = "gray90"),
+        panel.grid.minor = element_line(color = "gray90"),
+        
+        plot.margin = unit(c(0.5, 2, 0.5, 0.5), "cm")) +
+  labs(title=gene_name, x="Correlation coefficient", y="") +
+  
+  coord_cartesian(xlim = c(-0.6, 0.7), clip = "off")
+
+ggsave(paste0(gene_name, "_Correlation graph.pdf"), width=6, height=6, dpi=300)

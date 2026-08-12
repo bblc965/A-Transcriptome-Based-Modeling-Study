@@ -1,0 +1,54 @@
+#GSEA
+#Group difference analysis
+library(DESeq2)
+library(tidyverse)
+counts_01A <- read.csv("gene_count.csv", sep = ",", row.names = 1, check.names = F, stringsAsFactors = F, header = T)
+exp <- read.csv("gene_fpkm-log2Transformation.csv", sep = ",", row.names = 1, check.names = F, header = T)
+common_samples <- intersect(colnames(counts_01A), colnames(exp)) # Take common samples
+counts_01A <- counts_01A[, common_samples] # count retains only common samples
+exp <- exp[, common_samples]             # exp retains only common samples
+identical(colnames(counts_01A),colnames(exp))
+gene <- "***"#Fill in the corresponding group according to which gene it is.
+med=median(as.numeric(exp[gene,]))
+conditions=data.frame(sample=colnames(exp),
+                      group=factor(ifelse(exp[gene,]>med,"high","low"),levels = c("low","high"))) %>% 
+  column_to_rownames("sample")
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_01A,
+  colData = conditions,
+  design = ~ group)
+
+dds <- DESeq(dds)
+
+resultsNames(dds)
+res <- results(dds)
+DEG <- as.data.frame(res) %>% rownames_to_column("Gene")
+write.csv(DEG, "DEG-***.csv", row.names = F) #Fill in the corresponding group according to which gene it is.
+
+#GSEA
+library(org.Hs.eg.db)
+library(clusterProfiler)
+DEG <- read.csv("DEG-***.csv") 
+geneList <- DEG$log2FoldChange   
+names(geneList) <- DEG$Gene
+geneList <- sort(geneList, decreasing = TRUE)
+msigdb_GMTs <- "." # If the GMT file is in the current folder, simply use "."
+msigdb <- "***"#Download from the official website based on the analysis type.
+kegmt <- read.gmt(file.path(msigdb_GMTs,msigdb))
+
+set.seed(1)
+gsea <- GSEA(
+  geneList,
+  TERM2GENE = kegmt,
+  verbose = FALSE,
+  pvalueCutoff = 0.05
+)
+gsea_result_df <- as.data.frame(gsea)
+write.csv(gsea_result_df, "**-gsea_result-***.csv", row.names = F)
+
+# 绘图
+library(enrichplot)
+#gseaplot2(gsea, geneSetID = 1:5, subplots = 1:3)
+pdf("**-GSEA_***_.pdf", width = 10, height = 10)
+gseaplot2(gsea, geneSetID = 1:5, subplots = 1:3)
+dev.off()
